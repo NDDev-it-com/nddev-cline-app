@@ -74,6 +74,7 @@ python3 cli-tools/validate_public_contracts.py
 ```
 
 The validator is dependency-free and side-effect-free. It checks version/build
-metadata, release and npm integrity baselines, setup ids, command permission
-schemas, builder default-on projection, unsupported extension install/launch
-contract, absence of retired aliases/placeholders, and shared CI caller pins.
+metadata, release and npm integrity baselines, exact current Cline repo/docs
+surfaces, setup ids, command permission schemas, builder default-on projection,
+unsupported extension install/launch contract, placeholder absence, and shared
+CI caller pins.

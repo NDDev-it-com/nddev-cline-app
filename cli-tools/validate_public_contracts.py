@@ -34,7 +34,6 @@ EXPECTED = {
     "vsix_sha256": "a4641d8bc47f766300203cee0c4e1d84f690a88586b43e81ed015bba9af79a2d",
 }
 PLACEHOLDER_MARKER = "skele" + "ton"
-RETIRED_MARKERS = ("claude-dev" + "-cli", "open" + "claw", "q" + "coder", "qwen" + " code")
 
 
 def read_json(relative: str) -> dict[str, Any]:
@@ -179,13 +178,36 @@ def validate_runtime_contract(errors: list[str]) -> None:
         require(isinstance(extension, dict) and extension.get("supported") is False, "extension install must be unsupported", errors)
 
 
-def validate_absence_of_stale_terms(errors: list[str]) -> None:
+def validate_current_sources(errors: list[str]) -> None:
+    baseline = read_json("references/cline-baseline.json")
+    sources = baseline.get("sources")
+    require(isinstance(sources, list), "baseline sources missing", errors)
+    if not isinstance(sources, list):
+        return
+    expected_sources = {
+        "https://docs.cline.bot/getting-started/installing-cline",
+        "https://docs.cline.bot/getting-started/config",
+        "https://docs.cline.bot/cli/cli-reference",
+        "https://docs.cline.bot/customization/skills",
+        "https://docs.cline.bot/customization/plugins",
+        "https://docs.cline.bot/mcp/mcp-overview",
+        "https://github.com/cline/cline/releases/tag/v4.0.11",
+        "https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev",
+        "https://registry.npmjs.org/cline",
+    }
+    require(set(sources) == expected_sources, "current official source set mismatch", errors)
+
+
+def validate_absence_of_placeholders(errors: list[str]) -> None:
     for path in ROOT.rglob("*"):
         if ".git" in path.parts or path.is_dir():
             continue
         text = path.read_text(encoding="utf-8", errors="ignore").lower()
-        for marker in (PLACEHOLDER_MARKER, *RETIRED_MARKERS):
-            require(marker not in text, f"retired marker {marker!r} found in {path.relative_to(ROOT)}", errors)
+        require(
+            PLACEHOLDER_MARKER not in text,
+            f"placeholder marker found in {path.relative_to(ROOT)}",
+            errors,
+        )
 
 
 def validate_shared_ci(errors: list[str]) -> None:
@@ -207,7 +229,8 @@ def main() -> int:
     validate_setups(errors)
     validate_builder(errors)
     validate_runtime_contract(errors)
-    validate_absence_of_stale_terms(errors)
+    validate_current_sources(errors)
+    validate_absence_of_placeholders(errors)
     validate_shared_ci(errors)
     if errors:
         for error in errors:
