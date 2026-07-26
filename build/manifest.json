@@ -61,5 +61,25 @@
     "cli_command": "cline",
     "extension_tested_version": "4.0.11",
     "vscode_extension_id": "saoudrizwan.claude-dev"
+  },
+  "software_lifecycle": {
+    "install_argv": ["bun", "add", "--global", "--exact", "--trust", "cline@3.0.46"],
+    "install_environment": "minimal-allowlist-target-owned-bun-global",
+    "status_validation": "manifest-tree-digest-no-exec",
+    "install_precondition": "absent target-owned CLI software surface",
+    "update_precondition": "installed or partial target-owned CLI software surface",
+    "partial_state_policy": "install rejects any replace path or owned software parent; update may repair safe partial state",
+    "current_idempotent": true,
+    "bounds": {
+      "max_tree_paths": 50000,
+      "max_tree_bytes": 536870912,
+      "measured_cline_3_0_46_macos_arm64_paths": 25617,
+      "measured_cline_3_0_46_macos_arm64_bytes": 310408610
+    },
+    "layout": {
+      "visible_command": "bin/cline",
+      "global_dir": "software/cline-cli/install/global",
+      "software_manifest": "software/cline-cli.json"
+    }
   }
 }

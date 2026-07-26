@@ -56,6 +56,18 @@ python3 cli-tools/nddev_cline.py install-cli --target /absolute/target --json
 python3 cli-tools/nddev_cline.py update-cli --target /absolute/target --json
 ```
 
+`install-cli` runs only `bun add --global --exact --trust cline@3.0.46`
+with target-owned `BUN_INSTALL_GLOBAL_DIR`, `BUN_INSTALL_BIN`,
+`BUN_INSTALL_CACHE_DIR`, temp `HOME`, and temp XDG directories. The explicit
+trust is limited to the official pinned `cline` package because registry
+metadata declares `postinstall` and platform optional dependencies. Existing or
+partial target-owned CLI software surfaces must use `update-cli` or repair;
+`install-cli` only accepts an absent software surface, and current installs are
+idempotent. `software-status` is read-only and validates the deterministic
+software manifest and tree digest without executing the target binary. The
+machine-owned bounds and measured baseline live in `build/manifest.json` under
+`software_lifecycle.bounds`.
+
 Launch forwards stdio and the child exit code:
 
 ```bash
@@ -74,7 +86,7 @@ python3 cli-tools/validate_public_contracts.py
 ```
 
 The validator is dependency-free and side-effect-free. It checks version/build
-metadata, release and npm integrity baselines, exact current Cline repo/docs
-surfaces, setup ids, command permission schemas, builder default-on projection,
-unsupported extension install/launch contract, placeholder absence, and shared
-CI caller pins.
+metadata, release and npm integrity baselines, exact current Cline repo/docs and
+Bun docs surfaces, setup ids, command permission schemas, builder default-on
+projection, Bun install policy, unsupported extension install/launch contract,
+placeholder absence, and shared CI caller pins.

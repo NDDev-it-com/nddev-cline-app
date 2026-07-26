@@ -4,20 +4,18 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import contextlib
 import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
-import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NoReturn
@@ -34,14 +32,37 @@ BASELINE_REF = ROOT / "references" / "cline-baseline.json"
 TESTED_CLI_VERSION = "3.0.46"
 TESTED_EXTENSION_VERSION = "4.0.11"
 NPM_PACKAGE = "cline"
+BUN_PACKAGE_SPEC = f"{NPM_PACKAGE}@{TESTED_CLI_VERSION}"
+BUN_INSTALL_ARGV = ("add", "--global", "--exact", "--trust", BUN_PACKAGE_SPEC)
 OWNER_FILE_MODE = 0o600
 OWNER_DIRECTORY_MODE = 0o700
 OWNER_EXECUTABLE_MODE = 0o700
 METADATA_MAX_BYTES = 256 * 1024
 MANAGED_PAYLOAD_MAX_BYTES = 8 * 1024 * 1024
-DOWNLOAD_MAX_BYTES = 256 * 1024 * 1024
+SOFTWARE_TREE_MAX_BYTES = 512 * 1024 * 1024
+# Keep this limit synchronized with build/manifest.json software_lifecycle.bounds.
+SOFTWARE_TREE_MAX_PATHS = 50000
+PROCESS_OUTPUT_MAX_BYTES = 64 * 1024
 PROCESS_TIMEOUT_SECONDS = 120
+VERSION_PROBE_TIMEOUT_SECONDS = 20
 SETUP_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+VERSION_PATTERN = re.compile(r"(?<![0-9])([0-9]+\.[0-9]+\.[0-9]+)(?![0-9])")
+SOFTWARE_DIR_RELATIVE = Path("software") / "cline-cli"
+SOFTWARE_MANIFEST_RELATIVE = Path("software") / "cline-cli.json"
+SOFTWARE_REPLACE_PATHS = (
+    Path("bin") / COMMAND_NAME,
+    SOFTWARE_DIR_RELATIVE,
+    SOFTWARE_MANIFEST_RELATIVE,
+)
+SOFTWARE_PARENT_PATHS = tuple(
+    sorted(
+        {relative.parent for relative in SOFTWARE_REPLACE_PATHS if relative.parent != Path(".")},
+        key=str,
+    )
+)
+PACKAGE_WRAPPER_RELATIVE = (
+    SOFTWARE_DIR_RELATIVE / "install" / "global" / "node_modules" / "cline" / "bin" / "cline"
+)
 MANAGED_SETTINGS_KEYS = (
     "autoApprove",
     "browser",
@@ -875,12 +896,357 @@ def load_baseline() -> dict[str, Any]:
 
 
 def software_manifest_path(target: Path) -> Path:
-    return target / "software" / "cline-cli.json"
+    return target / SOFTWARE_MANIFEST_RELATIVE
 
 
 def cline_executable(target: Path) -> Path:
     suffix = ".cmd" if sys.platform.startswith("win") else ""
     return target / "bin" / f"{COMMAND_NAME}{suffix}"
+
+
+def path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def safe_child_base_environment() -> dict[str, str]:
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    for name in ("LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT", "ComSpec"):
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
+    return env
+
+
+def run_bounded_process(
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    label: str,
+    timeout: int = PROCESS_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=str(cwd),
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        fail(f"{label} executable was not found")
+    except subprocess.TimeoutExpired:
+        fail(f"{label} timed out after {timeout} seconds")
+    output_size = len(completed.stdout.encode("utf-8", errors="replace")) + len(
+        completed.stderr.encode("utf-8", errors="replace")
+    )
+    if output_size > PROCESS_OUTPUT_MAX_BYTES:
+        fail(f"{label} exceeded the {PROCESS_OUTPUT_MAX_BYTES}-byte output limit")
+    return completed
+
+
+def isolated_probe_environment(root: Path) -> dict[str, str]:
+    home = root / "home"
+    data = root / "data"
+    tmp = root / "tmp"
+    xdg_config = root / "xdg-config"
+    xdg_cache = root / "xdg-cache"
+    xdg_state = root / "xdg-state"
+    sandbox = root / "sandbox"
+    for directory in (home, data, tmp, xdg_config, xdg_cache, xdg_state, sandbox):
+        directory.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+        directory.chmod(OWNER_DIRECTORY_MODE)
+    env = safe_child_base_environment()
+    env.update(
+        {
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "CLINE_DATA_DIR": str(data),
+            "CLINE_SANDBOX": "true",
+            "CLINE_SANDBOX_DATA_DIR": str(sandbox),
+            "TMPDIR": str(tmp),
+            "XDG_CONFIG_HOME": str(xdg_config),
+            "XDG_CACHE_HOME": str(xdg_cache),
+            "XDG_STATE_HOME": str(xdg_state),
+        }
+    )
+    return env
+
+
+def require_safe_executable(
+    path: Path,
+    target: Path | None,
+    label: str,
+    *,
+    allow_hardlinks: bool = False,
+    owner_only_mode: bool = True,
+) -> os.stat_result:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail(f"{label} is missing")
+    if stat.S_ISLNK(info.st_mode):
+        if target is None:
+            fail(f"{label} must not be a symlink")
+        try:
+            resolved = path.resolve(strict=True)
+        except FileNotFoundError:
+            fail(f"{label} symlink is broken")
+        canonical_target = target.resolve()
+        if not path_is_relative_to(resolved, canonical_target):
+            fail(f"{label} symlink must stay inside the target")
+        target_info = require_regular_file(
+            resolved, f"{label} symlink target", owner_only=False
+        )
+        if not allow_hardlinks and target_info.st_nlink != 1:
+            fail(f"{label} symlink target must not have hard-link aliases")
+        if owner_only_mode and stat.S_IMODE(target_info.st_mode) & 0o077:
+            fail(f"{label} symlink target must not be readable or writable by group/other")
+        if not stat.S_IMODE(target_info.st_mode) & stat.S_IXUSR:
+            fail(f"{label} symlink target must be executable by the owner")
+        return target_info
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"{label} must be a regular file or target-owned symlink")
+    if not allow_hardlinks and info.st_nlink != 1:
+        fail(f"{label} must not have hard-link aliases")
+    if owner_only_mode and stat.S_IMODE(info.st_mode) & 0o077:
+        fail(f"{label} must not be readable or writable by group/other")
+    if not stat.S_IMODE(info.st_mode) & stat.S_IXUSR:
+        fail(f"{label} must be executable by the owner")
+    return info
+
+
+def resolve_target_owned_path(path: Path, root: Path, label: str) -> Path:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail(f"{label} is missing")
+    if not stat.S_ISLNK(info.st_mode):
+        return path
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError:
+        fail(f"{label} symlink is broken")
+    if not path_is_relative_to(resolved, root.resolve()):
+        fail(f"{label} symlink must stay inside the target")
+    return resolved
+
+
+def observed_cline_version(executable: Path, *, target: Path | None = None) -> str:
+    require_safe_executable(
+        executable, target, "Cline CLI executable", allow_hardlinks=True
+    )
+    with tempfile.TemporaryDirectory(prefix="nddev-cline-version-") as temporary:
+        root = Path(temporary)
+        completed = run_bounded_process(
+            [str(executable), "--version"],
+            cwd=root,
+            env=isolated_probe_environment(root),
+            label="Cline CLI version probe",
+            timeout=VERSION_PROBE_TIMEOUT_SECONDS,
+        )
+    if completed.returncode != 0:
+        fail("Cline CLI version probe failed")
+    combined = "\n".join((completed.stdout, completed.stderr))
+    match = VERSION_PATTERN.search(combined)
+    if match is None:
+        fail("Cline CLI version probe did not return a SemVer version")
+    return match.group(1)
+
+
+def software_manifest_identity(
+    baseline: dict[str, Any] | None = None, *, version: str = TESTED_CLI_VERSION
+) -> dict[str, Any]:
+    if baseline is None:
+        baseline = load_baseline()
+    npm = baseline.get("npm")
+    if not isinstance(npm, dict):
+        fail("baseline npm metadata missing")
+    integrity = npm.get("integrity")
+    shasum = npm.get("shasum")
+    if not isinstance(integrity, str) or not isinstance(shasum, str):
+        fail("baseline npm package metadata is incomplete")
+    return {
+        "schema_version": 1,
+        "install_method": "bun-global",
+        "package_manager": "bun",
+        "package": NPM_PACKAGE,
+        "package_spec": f"{NPM_PACKAGE}@{version}",
+        "version": version,
+        "executable": f"bin/{COMMAND_NAME}",
+        "global_dir": str(SOFTWARE_DIR_RELATIVE / "install" / "global"),
+        "bin_dir": "bin",
+        "integrity": integrity,
+        "shasum": shasum,
+    }
+
+
+def digest_regular_file(
+    path: Path,
+    label: str,
+    byte_counter: dict[str, int],
+    *,
+    allow_hardlinks: bool = False,
+) -> str:
+    before = path.lstat()
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        fail(f"{label} must be a regular file")
+    if not allow_hardlinks and before.st_nlink != 1:
+        fail(f"{label} must not have hard-link aliases")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    digest = hashlib.sha256()
+    try:
+        opened = os.fstat(descriptor)
+        if identity_of(opened) != identity_of(before):
+            fail_concurrent(f"{label} changed while it was being opened")
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            byte_counter["value"] += len(chunk)
+            if byte_counter["value"] > SOFTWARE_TREE_MAX_BYTES:
+                fail(f"installed Cline CLI tree exceeds the {SOFTWARE_TREE_MAX_BYTES}-byte limit")
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    final = path.lstat()
+    expected = identity_of(before)
+    if (
+        identity_of(opened) != expected
+        or identity_of(after) != expected
+        or identity_of(final) != expected
+    ):
+        fail_concurrent(f"{label} changed while it was being read")
+    return digest.hexdigest()
+
+
+def iter_software_tree_paths(root: Path) -> list[Path]:
+    paths = [Path("bin") / COMMAND_NAME]
+    install_root = root / SOFTWARE_DIR_RELATIVE
+    if install_root.exists() or install_root.is_symlink():
+        paths.append(SOFTWARE_DIR_RELATIVE)
+        for path in install_root.rglob("*"):
+            paths.append(path.relative_to(root))
+            if len(paths) > SOFTWARE_TREE_MAX_PATHS:
+                fail(f"installed Cline CLI tree exceeds the {SOFTWARE_TREE_MAX_PATHS}-path limit")
+    return sorted(set(paths), key=lambda item: str(item))
+
+
+def compute_software_tree_digest(root: Path) -> dict[str, Any]:
+    root = root.resolve()
+    byte_counter = {"value": 0}
+    records: list[dict[str, Any]] = []
+    for relative in iter_software_tree_paths(root):
+        if len(records) >= SOFTWARE_TREE_MAX_PATHS:
+            fail(f"installed Cline CLI tree exceeds the {SOFTWARE_TREE_MAX_PATHS}-path limit")
+        path = root / relative
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            fail(f"installed software path {relative} is missing")
+        mode = stat.S_IMODE(info.st_mode)
+        if stat.S_ISDIR(info.st_mode):
+            if stat.S_ISLNK(info.st_mode):
+                fail(f"installed software path {relative} must not be a directory symlink")
+            records.append({"path": str(relative), "type": "directory", "mode": mode})
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            resolved = resolve_target_owned_path(path, root, f"installed software path {relative}")
+            records.append(
+                {
+                    "path": str(relative),
+                    "type": "symlink",
+                    "target": os.readlink(path),
+                    "resolved": str(resolved.relative_to(root)),
+                }
+            )
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            fail(f"installed software path {relative} has an unsafe type")
+        digest = digest_regular_file(
+            path,
+            f"installed software file {relative}",
+            byte_counter,
+            allow_hardlinks=True,
+        )
+        records.append(
+            {
+                "path": str(relative),
+                "type": "file",
+                "mode": mode,
+                "size": info.st_size,
+                "nlink": info.st_nlink,
+                "sha256": digest,
+                "owner_executable": bool(mode & stat.S_IXUSR),
+            }
+        )
+    require_safe_executable(
+        root / "bin" / COMMAND_NAME,
+        root,
+        "Cline CLI executable",
+        allow_hardlinks=True,
+    )
+    entrypoint = resolve_target_owned_path(root / "bin" / COMMAND_NAME, root, "Cline CLI executable")
+    entrypoint_sha256 = digest_regular_file(
+        entrypoint, "Cline CLI executable", {"value": 0}, allow_hardlinks=True
+    )
+    package_wrapper = root / PACKAGE_WRAPPER_RELATIVE
+    package_wrapper_sha256 = digest_regular_file(
+        package_wrapper, "Cline package wrapper", {"value": 0}, allow_hardlinks=False
+    )
+    return {
+        "tree_digest": sha256_bytes(canonical_json(records)),
+        "tree_bytes": byte_counter["value"],
+        "tree_paths": len(records),
+        "entrypoint_sha256": entrypoint_sha256,
+        "entrypoint_resolved": str(entrypoint.relative_to(root)),
+        "package_wrapper": str(PACKAGE_WRAPPER_RELATIVE),
+        "package_wrapper_sha256": package_wrapper_sha256,
+    }
+
+
+def build_software_manifest(root: Path, *, version: str = TESTED_CLI_VERSION) -> dict[str, Any]:
+    return {
+        **software_manifest_identity(version=version),
+        **compute_software_tree_digest(root),
+    }
+
+
+def path_present(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def software_presence(target: Path) -> dict[str, Any]:
+    replace_paths_present = [
+        str(relative) for relative in SOFTWARE_REPLACE_PATHS if path_present(target / relative)
+    ]
+    owned_parent_paths_present = [
+        str(relative) for relative in SOFTWARE_PARENT_PATHS if path_present(target / relative)
+    ]
+    if not replace_paths_present and not owned_parent_paths_present:
+        state = "absent"
+    elif len(replace_paths_present) == len(SOFTWARE_REPLACE_PATHS):
+        state = "installed"
+    else:
+        state = "partial"
+    return {
+        "software_state": state,
+        "partial": state == "partial",
+        "replace_paths_present": replace_paths_present,
+        "owned_parent_paths_present": owned_parent_paths_present,
+    }
 
 
 def software_status(target: Path) -> dict[str, Any]:
@@ -892,13 +1258,18 @@ def software_status(target: Path) -> dict[str, Any]:
             "target": str(target),
             "version": None,
             "executable": None,
+            "software_state": "absent",
+            "partial": False,
+            "replace_paths_present": [],
+            "owned_parent_paths_present": [],
             "extension_supported": False,
             "extension_installed": None,
         }
     canonical_target = require_explicit_absolute_target(str(target))
     executable = cline_executable(canonical_target)
     manifest = software_manifest_path(canonical_target)
-    if not executable.exists() or not manifest.exists():
+    presence = software_presence(canonical_target)
+    if presence["software_state"] != "installed":
         return {
             "ok": True,
             "installed": False,
@@ -906,115 +1277,370 @@ def software_status(target: Path) -> dict[str, Any]:
             "target": str(canonical_target),
             "version": None,
             "executable": str(executable),
+            **presence,
             "extension_supported": False,
             "extension_installed": None,
         }
-    require_regular_file(executable, "Cline CLI executable")
-    info = load_json_object(manifest, "software manifest", owner_only=True)
-    current = (
-        info.get("schema_version") == 1
-        and info.get("version") == TESTED_CLI_VERSION
-        and info.get("executable") == f"bin/{COMMAND_NAME}"
-    )
-    return {
+    try:
+        info = load_json_object(manifest, "software manifest", owner_only=True)
+    except ClineSetupError as exc:
+        return {
+            "ok": True,
+            "installed": True,
+            "current": False,
+            "target": str(canonical_target),
+            "version": None,
+            "executable": str(executable),
+            **presence,
+            "validation_error": str(exc),
+            "extension_supported": False,
+            "extension_installed": None,
+        }
+    try:
+        expected = build_software_manifest(canonical_target)
+    except ClineSetupError as exc:
+        expected = None
+        validation_error = str(exc)
+    else:
+        validation_error = None
+    current = expected is not None and info == expected
+    result = {
         "ok": True,
         "installed": True,
         "current": current,
         "target": str(canonical_target),
         "version": info.get("version"),
         "executable": str(executable),
+        "package": info.get("package"),
+        "package_manager": info.get("package_manager"),
+        "install_method": info.get("install_method"),
+        **presence,
         "extension_supported": False,
         "extension_installed": None,
     }
+    if validation_error is not None:
+        result["validation_error"] = validation_error
+    return result
 
 
-def download_bytes(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": PRODUCT_NAME})
-    with urllib.request.urlopen(request, timeout=PROCESS_TIMEOUT_SECONDS) as response:
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > DOWNLOAD_MAX_BYTES:
-                fail("Cline CLI download exceeded the 256 MiB bound")
-            chunks.append(chunk)
-    return b"".join(chunks)
+def install_stage_environment(stage_root: Path, live_stage: Path) -> dict[str, str]:
+    home = stage_root / "home"
+    cache = stage_root / "cache"
+    tmp = stage_root / "tmp"
+    xdg_config = stage_root / "xdg-config"
+    xdg_cache = stage_root / "xdg-cache"
+    xdg_state = stage_root / "xdg-state"
+    global_dir = live_stage / SOFTWARE_DIR_RELATIVE / "install" / "global"
+    bin_dir = live_stage / "bin"
+    cline_data = stage_root / "cline-data"
+    cline_sandbox = stage_root / "cline-sandbox"
+    for directory in (
+        home,
+        cache,
+        tmp,
+        xdg_config,
+        xdg_cache,
+        xdg_state,
+        global_dir,
+        bin_dir,
+        cline_data,
+        cline_sandbox,
+    ):
+        directory.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+        directory.chmod(OWNER_DIRECTORY_MODE)
+    env = safe_child_base_environment()
+    env.update(
+        {
+            "BUN_INSTALL_GLOBAL_DIR": str(global_dir),
+            "BUN_INSTALL_BIN": str(bin_dir),
+            "BUN_INSTALL_CACHE_DIR": str(cache),
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "TMPDIR": str(tmp),
+            "XDG_CONFIG_HOME": str(xdg_config),
+            "XDG_CACHE_HOME": str(xdg_cache),
+            "XDG_STATE_HOME": str(xdg_state),
+            "CLINE_DATA_DIR": str(cline_data),
+            "CLINE_SANDBOX": "true",
+            "CLINE_SANDBOX_DATA_DIR": str(cline_sandbox),
+        }
+    )
+    return env
 
 
-def expected_integrity_digest(integrity: str) -> bytes:
-    algorithm, encoded = integrity.split("-", 1)
-    if algorithm != "sha512":
-        fail("only sha512 npm integrity is supported")
-    return base64.b64decode(encoded)
+def normalize_stage_executable(live_stage: Path) -> None:
+    executable = live_stage / "bin" / COMMAND_NAME
+    package_wrapper = live_stage / PACKAGE_WRAPPER_RELATIVE
+    require_safe_executable(
+        package_wrapper,
+        live_stage,
+        "Cline package wrapper",
+        allow_hardlinks=False,
+        owner_only_mode=False,
+    )
+    try:
+        info = executable.lstat()
+    except FileNotFoundError:
+        fail("bun did not create bin/cline")
+    if stat.S_ISLNK(info.st_mode):
+        try:
+            resolved = executable.resolve(strict=True)
+        except FileNotFoundError:
+            fail("bun created a broken bin/cline symlink")
+        if not path_is_relative_to(resolved, live_stage.resolve()):
+            fail("bun created a bin/cline symlink outside the staging tree")
+    elif not stat.S_ISREG(info.st_mode):
+        fail("bun did not create a regular bin/cline executable")
+    executable.unlink()
+    package_from_bin = Path("..") / PACKAGE_WRAPPER_RELATIVE
+    wrapper = (
+        "#!/bin/sh\n"
+        'SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
+        f'exec "$SCRIPT_DIR"/{shlex.quote(str(package_from_bin))} "$@"\n'
+    )
+    executable.write_text(wrapper, encoding="utf-8")
+    executable.chmod(OWNER_EXECUTABLE_MODE)
+    return
 
 
-def validate_npm_integrity(content: bytes, integrity: str) -> None:
-    expected = expected_integrity_digest(integrity)
-    actual = hashlib.sha512(content).digest()
-    if actual != expected:
-        fail("downloaded Cline CLI npm tarball integrity mismatch")
+def chmod_private_tree(root: Path) -> None:
+    for path in sorted(root.rglob("*"), key=lambda item: len(item.parts)):
+        if path.is_symlink():
+            continue
+        info = path.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            path.chmod(OWNER_DIRECTORY_MODE)
+        elif stat.S_ISREG(info.st_mode):
+            if stat.S_IMODE(info.st_mode) & stat.S_IXUSR:
+                path.chmod(OWNER_EXECUTABLE_MODE)
+            else:
+                path.chmod(OWNER_FILE_MODE)
 
 
-def safe_tar_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
-    members = archive.getmembers()
-    for member in members:
-        path = Path(member.name)
-        if path.is_absolute() or ".." in path.parts:
-            fail(f"unsafe archive member path: {member.name}")
-        if member.issym() or member.islnk() or member.isdev():
-            fail(f"unsafe archive member type: {member.name}")
-    return members
+def cleanup_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def validate_replace_destination(target: Path, relative: Path) -> None:
+    destination = target / relative
+    if not destination.exists() and not destination.is_symlink():
+        return
+    info = destination.lstat()
+    if relative == Path("bin") / COMMAND_NAME:
+        require_safe_executable(
+            destination, target, "existing Cline CLI executable", allow_hardlinks=False
+        )
+        return
+    if stat.S_ISLNK(info.st_mode):
+        fail(f"existing software path {relative} must not be a symlink")
+    if stat.S_ISDIR(info.st_mode):
+        if not is_owner_private_directory(info):
+            fail(f"existing software directory {relative} must be private to the current user")
+        return
+    if stat.S_ISREG(info.st_mode):
+        require_regular_file(destination, f"existing software file {relative}", owner_only=True)
+        return
+    fail(f"existing software path {relative} has an unsafe type")
+
+
+def validate_software_parent_destination(target: Path, relative: Path) -> None:
+    parent = target / relative
+    if not path_present(parent):
+        return
+    info = require_directory(parent, f"existing software parent {relative}")
+    if not is_owner_private_directory(info):
+        fail(f"existing software parent {relative} must be private to the current user")
+
+
+def validate_existing_software_surface(target: Path) -> None:
+    for relative in SOFTWARE_PARENT_PATHS:
+        validate_software_parent_destination(target, relative)
+    for relative in SOFTWARE_REPLACE_PATHS:
+        if path_present(target / relative):
+            validate_replace_destination(target, relative)
+
+
+def ensure_replace_parent(destination: Path) -> None:
+    parent = destination.parent
+    try:
+        info = parent.lstat()
+    except FileNotFoundError:
+        parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True)
+        parent.chmod(OWNER_DIRECTORY_MODE)
+        return
+    if stat.S_ISLNK(info.st_mode):
+        fail(f"software destination parent {parent} must not be a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"software destination parent {parent} must be a directory")
+    if not is_owner_private_directory(info):
+        fail(f"software destination parent {parent} must be private to the current user")
+
+
+def move_replace_path(source: Path, destination: Path) -> None:
+    ensure_replace_parent(destination)
+    os.replace(source, destination)
+
+
+def move_old_path(source: Path, saved: Path) -> None:
+    saved.parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    os.replace(source, saved)
+
+
+def restore_software_paths(
+    target: Path,
+    hold: Path,
+    live_stage: Path,
+    *,
+    moved_old: list[Path],
+    installed_new: list[Path],
+    preexisting_parent_paths: set[Path],
+) -> None:
+    new_paths = set(installed_new)
+    for relative in SOFTWARE_REPLACE_PATHS:
+        if relative not in new_paths and not (live_stage / relative).exists():
+            new_paths.add(relative)
+    for relative in reversed(SOFTWARE_REPLACE_PATHS):
+        destination = target / relative
+        if relative in new_paths and (destination.exists() or destination.is_symlink()):
+            cleanup_path(destination)
+    for relative in reversed(moved_old):
+        saved = hold / relative
+        if not saved.exists() and not saved.is_symlink():
+            continue
+        move_replace_path(saved, target / relative)
+    for relative in sorted(SOFTWARE_PARENT_PATHS, key=lambda item: len(item.parts), reverse=True):
+        if relative in preexisting_parent_paths:
+            continue
+        parent = target / relative
+        if not parent.exists() or parent.is_symlink() or not parent.is_dir():
+            continue
+        try:
+            parent.rmdir()
+        except OSError:
+            continue
+
+
+def replace_software_state(target: Path, live_stage: Path, hold_parent: Path) -> None:
+    for relative in SOFTWARE_REPLACE_PATHS:
+        source = live_stage / relative
+        if not source.exists() and not source.is_symlink():
+            fail(f"staged software path {relative} is missing")
+        validate_replace_destination(target, relative)
+    hold = hold_parent / "rollback"
+    if hold.exists() or hold.is_symlink():
+        cleanup_path(hold)
+    hold.mkdir(mode=OWNER_DIRECTORY_MODE)
+    preexisting_parent_paths = {
+        relative for relative in SOFTWARE_PARENT_PATHS if path_present(target / relative)
+    }
+    moved_old: list[Path] = []
+    installed_new: list[Path] = []
+    try:
+        for relative in SOFTWARE_REPLACE_PATHS:
+            destination = target / relative
+            if destination.exists() or destination.is_symlink():
+                saved = hold / relative
+                move_old_path(destination, saved)
+                moved_old.append(relative)
+        for relative in SOFTWARE_REPLACE_PATHS:
+            move_replace_path(live_stage / relative, target / relative)
+            installed_new.append(relative)
+        status = software_status(target)
+        if not status["installed"] or not status["current"]:
+            fail("installed Cline CLI did not validate as the tested version")
+    except BaseException:
+        moved_old = [
+            relative
+            for relative in SOFTWARE_REPLACE_PATHS
+            if (hold / relative).exists() or (hold / relative).is_symlink()
+        ]
+        restore_software_paths(
+            target,
+            hold,
+            live_stage,
+            moved_old=moved_old,
+            installed_new=installed_new,
+            preexisting_parent_paths=preexisting_parent_paths,
+        )
+        raise
+    finally:
+        shutil.rmtree(hold, ignore_errors=True)
+
+
+def run_bun_install(stage_root: Path, live_stage: Path) -> None:
+    env = install_stage_environment(stage_root, live_stage)
+    completed = run_bounded_process(
+        ["bun", *BUN_INSTALL_ARGV],
+        cwd=stage_root,
+        env=env,
+        label="bun Cline CLI install",
+    )
+    if completed.returncode != 0:
+        fail("bun failed to install the pinned Cline CLI")
+    normalize_stage_executable(live_stage)
+    chmod_private_tree(live_stage)
+    observed = observed_cline_version(live_stage / "bin" / COMMAND_NAME, target=live_stage)
+    if observed != TESTED_CLI_VERSION:
+        fail(f"bun installed Cline CLI {observed}, expected {TESTED_CLI_VERSION}")
+
+
+def write_stage_manifest(live_stage: Path) -> None:
+    manifest = live_stage / SOFTWARE_MANIFEST_RELATIVE
+    manifest.parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    manifest.write_bytes(canonical_json(build_software_manifest(live_stage)))
+    manifest.chmod(OWNER_FILE_MODE)
 
 
 def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
     canonical_target = ensure_target_directory(target)
     with target_lock(canonical_target):
-        baseline = load_baseline()
-        npm = baseline.get("npm")
-        if not isinstance(npm, dict):
-            fail("baseline npm metadata missing")
-        url = npm.get("tarball")
-        integrity = npm.get("integrity")
-        if not isinstance(url, str) or not isinstance(integrity, str):
-            fail("baseline npm tarball metadata is incomplete")
-        archive_bytes = download_bytes(url)
-        validate_npm_integrity(archive_bytes, integrity)
-        staging = canonical_target.parent / f".{canonical_target.name}.nddev-cline-cli-stage"
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(mode=OWNER_DIRECTORY_MODE)
-        try:
-            archive_path = staging / "cline.tgz"
-            archive_path.write_bytes(archive_bytes)
-            unpacked = staging / "unpacked"
-            with tarfile.open(archive_path, "r:gz") as archive:
-                archive.extractall(unpacked, members=safe_tar_members(archive))
-            binary_source = unpacked / "package" / "bin" / "cline"
-            if not binary_source.is_file():
-                fail("npm tarball did not contain package/bin/cline")
-            bin_dir = canonical_target / "bin"
-            bin_dir.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-            executable = cline_executable(canonical_target)
-            temporary = bin_dir / f".{executable.name}.tmp"
-            shutil.copy2(binary_source, temporary)
-            temporary.chmod(OWNER_EXECUTABLE_MODE)
-            os.replace(temporary, executable)
-            manifest = {
-                "schema_version": 1,
+        status = software_status(canonical_target)
+        if status["installed"] and status["current"]:
+            return {
+                "ok": True,
+                "operation": operation,
+                "target": str(canonical_target),
                 "version": TESTED_CLI_VERSION,
-                "executable": f"bin/{COMMAND_NAME}",
                 "package": NPM_PACKAGE,
-                "integrity": integrity,
-                "tarball": url,
+                "package_manager": "bun",
+                "install_method": "bun-global",
+                "executable": str(cline_executable(canonical_target)),
+                "changed": False,
             }
-            software_manifest_path(canonical_target).parent.mkdir(
-                mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True
+        if operation == "install-cli":
+            if status.get("partial"):
+                fail(
+                    "partial target-owned Cline CLI software state exists; "
+                    "use update-cli or repair/remove the target-owned software paths"
+                )
+            if status["installed"]:
+                fail("Cline CLI is already installed but not current; use update-cli")
+            if status.get("owned_parent_paths_present") or status.get("replace_paths_present"):
+                fail(
+                    "target-owned Cline CLI software paths already exist; "
+                    "use update-cli or repair/remove them"
+                )
+        if operation == "update-cli" and status["software_state"] == "absent":
+            fail("Cline CLI is not installed; use install-cli")
+        if operation == "update-cli":
+            validate_existing_software_surface(canonical_target)
+        staging = Path(
+            tempfile.mkdtemp(
+                dir=canonical_target.parent,
+                prefix=f".{canonical_target.name}.nddev-cline-cli-stage.",
             )
-            software_manifest_path(canonical_target).write_bytes(canonical_json(manifest))
-            software_manifest_path(canonical_target).chmod(OWNER_FILE_MODE)
+        )
+        staging.chmod(OWNER_DIRECTORY_MODE)
+        try:
+            live_stage = staging / "live"
+            live_stage.mkdir(mode=OWNER_DIRECTORY_MODE)
+            run_bun_install(staging, live_stage)
+            chmod_private_tree(live_stage)
+            write_stage_manifest(live_stage)
+            replace_software_state(canonical_target, live_stage, staging)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
     return {
@@ -1023,7 +1649,10 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
         "target": str(canonical_target),
         "version": TESTED_CLI_VERSION,
         "package": NPM_PACKAGE,
+        "package_manager": "bun",
+        "install_method": "bun-global",
         "executable": str(cline_executable(canonical_target)),
+        "changed": True,
     }
 
 
@@ -1036,13 +1665,11 @@ def isolated_child_environment(target: Path, command_permissions: dict[str, Any]
     for directory in (home, data, sandbox, runtime, tmp):
         directory.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
         directory.chmod(OWNER_DIRECTORY_MODE)
-    env: dict[str, str] = {}
-    for name, value in os.environ.items():
-        if name in TOKEN_ENV_NAMES:
-            continue
-        if name.startswith("CLINE_"):
-            continue
-        env[name] = value
+    env = safe_child_base_environment()
+    for name in ("TERM", "COLORTERM", "NO_COLOR", "FORCE_COLOR"):
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
     env.update(
         {
             "HOME": str(home),

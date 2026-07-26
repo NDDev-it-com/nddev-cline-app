@@ -49,7 +49,7 @@
     "direct_command": "CLINE_DATA_DIR=<absolute-target>/data CLINE_COMMAND_PERMISSIONS=<setup-policy> <absolute-target>/bin/cline --data-dir <absolute-target> --config <absolute-target>/data/settings --hooks-dir <absolute-target>/hooks [setup launch args] [args...]",
     "data_environment_variable": "CLINE_DATA_DIR",
     "permissions_environment_variable": "CLINE_COMMAND_PERMISSIONS",
-    "executable_source": "validated-target-owned-npm-cline-tarball",
+    "executable_source": "validated-target-owned-bun-global-install",
     "extension_launch_supported": false,
     "extension_install_supported": false,
     "extension_install_reason": "VS Code extension installation and launch require editor-managed state and are deliberately out of scope for this target-only manager.",
@@ -88,11 +88,57 @@
     "cli": {
       "supported": true,
       "tested_version": "3.0.46",
-      "source": "npm package cline with immutable integrity",
+      "source": "npm package cline installed by Bun global exact package manager contract",
       "package": "cline",
+      "package_spec": "cline@3.0.46",
+      "package_manager": "bun",
+      "install_argv": ["bun", "add", "--global", "--exact", "--trust", "cline@3.0.46"],
+      "trusted_lifecycle_scripts": {
+        "enabled": true,
+        "package": "cline",
+        "version": "3.0.46",
+        "reason": "Official cline@3.0.46 registry metadata declares a postinstall script and platform optionalDependencies; Bun requires explicit trust for lifecycle scripts."
+      },
+      "environment_policy": {
+        "inheritance": "minimal-allowlist",
+        "target_owned": true,
+        "required": [
+          "BUN_INSTALL_GLOBAL_DIR",
+          "BUN_INSTALL_BIN",
+          "BUN_INSTALL_CACHE_DIR",
+          "HOME",
+          "USERPROFILE",
+          "TMPDIR",
+          "XDG_CONFIG_HOME",
+          "XDG_CACHE_HOME",
+          "XDG_STATE_HOME"
+        ],
+        "forbidden": [
+          "NODE_AUTH_TOKEN",
+          "NPM_TOKEN",
+          "BUN_AUTH_TOKEN",
+          "npm_config_userconfig",
+          "BUN_CONFIG_*",
+          "*_API_KEY",
+          "*_TOKEN",
+          "*_SECRET"
+        ]
+      },
       "integrity": "sha512-U6uH3sLVvqx4fP65ejHkswhk3WvYOM2LCbQBX77Z7Tha4EX35vo2XZ51F6WnIiKlCAYZJ+YAEou2Yha/EAk+2A==",
+      "status_validation": "manifest-tree-digest-no-exec",
+      "install_precondition": "absent target-owned CLI software surface",
+      "update_precondition": "installed or partial target-owned CLI software surface",
+      "partial_state_policy": "install rejects any replace path or owned software parent; update may repair safe partial state",
+      "current_idempotent": true,
+      "bounds": {
+        "max_tree_paths": 50000,
+        "max_tree_bytes": 536870912,
+        "rationale": "Machine-owned measured baseline and headroom rationale live in build/manifest.json software_lifecycle.bounds."
+      },
       "layout": {
         "visible_command": "bin/cline",
+        "global_dir": "software/cline-cli/install/global",
+        "tree_digest_fields": ["tree_digest", "entrypoint_sha256"],
         "software_manifest": "software/cline-cli.json"
       }
     },

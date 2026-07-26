@@ -5,10 +5,14 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "cli-tools"))
+import nddev_cline  # noqa: E402
+
 SEMVER = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:[-+].*)?\Z")
 SETUP_IDS = ["safe", "balanced", "full-auto"]
 SHARED_CI_COMMIT = "2ccb80e96f5771b6a6b4eae63a4f47e232906dc7"
@@ -25,6 +29,7 @@ SHARED_CALLERS = {
 EXPECTED = {
     "cli_version": "3.0.46",
     "cli_package": "cline",
+    "cli_install_argv": ["bun", "add", "--global", "--exact", "--trust", "cline@3.0.46"],
     "cli_integrity": "sha512-U6uH3sLVvqx4fP65ejHkswhk3WvYOM2LCbQBX77Z7Tha4EX35vo2XZ51F6WnIiKlCAYZJ+YAEou2Yha/EAk+2A==",
     "cli_shasum": "5b731496d251f76448fe676edbf4fde415b58881",
     "extension_version": "4.0.11",
@@ -118,6 +123,45 @@ def validate_versions(errors: list[str]) -> None:
         require(
             npm.get("shasum") == build.get("cline_cli_shasum"),
             "baseline npm shasum mismatch",
+            errors,
+        )
+        require(
+            npm.get("scripts", {}).get("postinstall") == "node ./postinstall.mjs || true",
+            "baseline npm postinstall mismatch",
+            errors,
+        )
+        optional = npm.get("optional_dependencies")
+        require(isinstance(optional, dict), "baseline optional dependencies missing", errors)
+        if isinstance(optional, dict):
+            require(
+                set(optional)
+                == {
+                    "@cline/cli-darwin-arm64",
+                    "@cline/cli-darwin-x64",
+                    "@cline/cli-linux-arm64",
+                    "@cline/cli-linux-x64",
+                    "@cline/cli-windows-arm64",
+                    "@cline/cli-windows-x64",
+                },
+                "baseline optional dependency set mismatch",
+                errors,
+            )
+            require(
+                all(version == build.get("cline_cli_tested") for version in optional.values()),
+                "baseline optional dependency version mismatch",
+                errors,
+            )
+    package_manager = baseline.get("package_manager")
+    require(isinstance(package_manager, dict), "baseline package_manager missing", errors)
+    if isinstance(package_manager, dict):
+        require(
+            package_manager.get("install_argv") == EXPECTED["cli_install_argv"],
+            "baseline Bun install argv mismatch",
+            errors,
+        )
+        require(
+            package_manager.get("global_dir_env") == "BUN_INSTALL_GLOBAL_DIR",
+            "baseline Bun global dir env mismatch",
             errors,
         )
     if isinstance(extension, dict):
@@ -282,6 +326,7 @@ def validate_builder(errors: list[str]) -> None:
 
 def validate_runtime_contract(errors: list[str]) -> None:
     contract = read_json("config/nddev-contract.json")
+    manifest = read_json("build/manifest.json")
     launch = contract.get("runtime_launch")
     software = contract.get("software_install")
     require(isinstance(launch, dict), "runtime_launch missing", errors)
@@ -302,6 +347,11 @@ def validate_runtime_contract(errors: list[str]) -> None:
             "tokens must be stripped",
             errors,
         )
+        require(
+            launch.get("executable_source") == "validated-target-owned-bun-global-install",
+            "runtime executable source mismatch",
+            errors,
+        )
     if isinstance(software, dict):
         cli = software.get("cli")
         extension = software.get("extension")
@@ -315,6 +365,121 @@ def validate_runtime_contract(errors: list[str]) -> None:
             "extension install must be unsupported",
             errors,
         )
+        if isinstance(cli, dict):
+            require(
+                cli.get("package_manager") == "bun",
+                "CLI package manager must be Bun",
+                errors,
+            )
+            require(
+                cli.get("install_argv") == EXPECTED["cli_install_argv"],
+                "CLI Bun install argv mismatch",
+                errors,
+            )
+            require(
+                cli.get("status_validation") == "manifest-tree-digest-no-exec",
+                "CLI status validation policy mismatch",
+                errors,
+            )
+            require(
+                cli.get("install_precondition")
+                == "absent target-owned CLI software surface",
+                "CLI install precondition mismatch",
+                errors,
+            )
+            require(
+                cli.get("update_precondition")
+                == "installed or partial target-owned CLI software surface",
+                "CLI update precondition mismatch",
+                errors,
+            )
+            require(
+                cli.get("partial_state_policy")
+                == (
+                    "install rejects any replace path or owned software parent; "
+                    "update may repair safe partial state"
+                ),
+                "CLI partial state policy mismatch",
+                errors,
+            )
+            require(
+                cli.get("trusted_lifecycle_scripts", {}).get("enabled") is True,
+                "CLI trusted lifecycle script policy missing",
+                errors,
+            )
+            bounds = cli.get("bounds")
+            require(isinstance(bounds, dict), "CLI software bounds missing", errors)
+            if isinstance(bounds, dict):
+                require(
+                    bounds.get("max_tree_paths") == nddev_cline.SOFTWARE_TREE_MAX_PATHS,
+                    "CLI path bound mismatch",
+                    errors,
+                )
+                require(
+                    bounds.get("max_tree_bytes") == nddev_cline.SOFTWARE_TREE_MAX_BYTES,
+                    "CLI byte bound mismatch",
+                    errors,
+                )
+            env_policy = cli.get("environment_policy")
+            require(isinstance(env_policy, dict), "CLI environment policy missing", errors)
+            if isinstance(env_policy, dict):
+                require(
+                    env_policy.get("inheritance") == "minimal-allowlist",
+                    "CLI environment inheritance mismatch",
+                    errors,
+                )
+                require(
+                    "NODE_AUTH_TOKEN" in env_policy.get("forbidden", []),
+                    "CLI forbidden auth env mismatch",
+                    errors,
+                )
+    lifecycle = manifest.get("software_lifecycle")
+    require(isinstance(lifecycle, dict), "manifest software_lifecycle missing", errors)
+    if isinstance(lifecycle, dict):
+        require(
+            lifecycle.get("install_argv") == EXPECTED["cli_install_argv"],
+            "manifest software install argv mismatch",
+            errors,
+        )
+        require(
+            lifecycle.get("status_validation") == "manifest-tree-digest-no-exec",
+            "manifest software status policy mismatch",
+            errors,
+        )
+        require(
+            lifecycle.get("install_precondition")
+            == "absent target-owned CLI software surface",
+            "manifest software install precondition mismatch",
+            errors,
+        )
+        require(
+            lifecycle.get("update_precondition")
+            == "installed or partial target-owned CLI software surface",
+            "manifest software update precondition mismatch",
+            errors,
+        )
+        require(
+            lifecycle.get("partial_state_policy")
+            == (
+                "install rejects any replace path or owned software parent; "
+                "update may repair safe partial state"
+            ),
+            "manifest software partial policy mismatch",
+            errors,
+        )
+        bounds = lifecycle.get("bounds")
+        require(isinstance(bounds, dict), "manifest software bounds missing", errors)
+        if isinstance(bounds, dict):
+            require(
+                bounds.get("max_tree_paths") == nddev_cline.SOFTWARE_TREE_MAX_PATHS,
+                "manifest software path bound mismatch",
+                errors,
+            )
+            require(
+                bounds.get("max_tree_bytes") == nddev_cline.SOFTWARE_TREE_MAX_BYTES,
+                "manifest software byte bound mismatch",
+                errors,
+            )
 
 
 def validate_current_sources(errors: list[str]) -> None:
@@ -330,9 +495,15 @@ def validate_current_sources(errors: list[str]) -> None:
         "https://docs.cline.bot/customization/skills",
         "https://docs.cline.bot/customization/plugins",
         "https://docs.cline.bot/mcp/mcp-overview",
+        "https://cline.bot/cli",
+        "https://raw.githubusercontent.com/cline/cline/main/apps/cli/package.json",
+        "https://raw.githubusercontent.com/cline/cline/main/apps/cli/README.md",
         "https://github.com/cline/cline/releases/tag/v4.0.11",
         "https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev",
         "https://registry.npmjs.org/cline",
+        "https://bun.sh/docs/pm/cli/add",
+        "https://bun.sh/docs/pm/lifecycle",
+        "https://bun.sh/docs/runtime/bunfig",
     }
     require(set(sources) == expected_sources, "current official source set mismatch", errors)
 

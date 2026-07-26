@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "captured_at": "2026-07-26",
+  "captured_at": "2026-07-27",
   "product": "Cline",
   "cli": {
     "command": "cline",
@@ -15,7 +15,26 @@
     "version": "3.0.46",
     "integrity": "sha512-U6uH3sLVvqx4fP65ejHkswhk3WvYOM2LCbQBX77Z7Tha4EX35vo2XZ51F6WnIiKlCAYZJ+YAEou2Yha/EAk+2A==",
     "shasum": "5b731496d251f76448fe676edbf4fde415b58881",
-    "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.46.tgz"
+    "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.46.tgz",
+    "scripts": {
+      "postinstall": "node ./postinstall.mjs || true"
+    },
+    "optional_dependencies": {
+      "@cline/cli-darwin-arm64": "3.0.46",
+      "@cline/cli-darwin-x64": "3.0.46",
+      "@cline/cli-linux-arm64": "3.0.46",
+      "@cline/cli-linux-x64": "3.0.46",
+      "@cline/cli-windows-arm64": "3.0.46",
+      "@cline/cli-windows-x64": "3.0.46"
+    }
+  },
+  "package_manager": {
+    "name": "bun",
+    "install_argv": ["bun", "add", "--global", "--exact", "--trust", "cline@3.0.46"],
+    "global_dir_env": "BUN_INSTALL_GLOBAL_DIR",
+    "global_bin_env": "BUN_INSTALL_BIN",
+    "cache_dir_env": "BUN_INSTALL_CACHE_DIR",
+    "trust_reason": "cline@3.0.46 declares postinstall and platform optionalDependencies; Bun requires explicit trust for lifecycle scripts."
   },
   "extension": {
     "publisher": "saoudrizwan",
@@ -64,8 +83,14 @@
     "https://docs.cline.bot/customization/skills",
     "https://docs.cline.bot/customization/plugins",
     "https://docs.cline.bot/mcp/mcp-overview",
+    "https://cline.bot/cli",
+    "https://raw.githubusercontent.com/cline/cline/main/apps/cli/package.json",
+    "https://raw.githubusercontent.com/cline/cline/main/apps/cli/README.md",
     "https://github.com/cline/cline/releases/tag/v4.0.11",
     "https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev",
-    "https://registry.npmjs.org/cline"
+    "https://registry.npmjs.org/cline",
+    "https://bun.sh/docs/pm/cli/add",
+    "https://bun.sh/docs/pm/lifecycle",
+    "https://bun.sh/docs/runtime/bunfig"
   ]
 }
