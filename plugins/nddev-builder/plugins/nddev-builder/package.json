@@ -1,0 +1,22 @@
+{
+  "name": "nddev-builder",
+  "version": "0.1.0",
+  "description": "NDDev Cline builder plugin projection marker.",
+  "private": true,
+  "cline": {
+    "plugins": [
+      {
+        "paths": ["./index.js"],
+        "capabilities": ["tools", "hooks"]
+      }
+    ]
+  },
+  "peerDependencies": {
+    "@cline/sdk": "*"
+  },
+  "peerDependenciesMeta": {
+    "@cline/sdk": {
+      "optional": true
+    }
+  }
+}

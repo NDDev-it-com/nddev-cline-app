@@ -1,0 +1,65 @@
+{
+  "schema_version": 2,
+  "name": "nddev-cline-app",
+  "build_version": "0.1.0",
+  "entrypoint": "python3 cli-tools/nddev_cline.py",
+  "source_root": "setups",
+  "setup_ids": ["safe", "balanced", "full-auto"],
+  "managed_files": [
+    "data/settings/global-settings.json",
+    "data/settings/cline_mcp_settings.json",
+    "rules/nddev-managed.md",
+    "data/settings/skills/nddev-builder/SKILL.md",
+    "skills/nddev-builder/SKILL.md",
+    "agents/nddev-builder.md",
+    "plugins/nddev-builder/package.json",
+    "plugins/nddev-builder/index.js",
+    "NDDEV-CLINE-SETUP.json"
+  ],
+  "permission_policy": {
+    "configuration_surface": "Cline CLI --auto-approve plus CLINE_COMMAND_PERMISSIONS JSON policy",
+    "setups": {
+      "safe": {
+        "launch_args": ["--plan", "--auto-approve", "false"],
+        "command_permissions": {
+          "allow": ["git status*", "git diff*", "git log*"],
+          "deny": ["*"],
+          "allowRedirects": false
+        }
+      },
+      "balanced": {
+        "launch_args": ["--auto-approve", "false"],
+        "command_permissions": {
+          "allow": ["git status*", "git diff*", "git log*", "npm test*", "python3 -m unittest*"],
+          "deny": ["rm -rf *", "sudo *", "git push*", "gh auth*", "cline auth*"],
+          "allowRedirects": false
+        }
+      },
+      "full-auto": {
+        "launch_args": ["--auto-approve", "true"],
+        "command_permissions": {
+          "allow": ["*"],
+          "deny": ["rm -rf *", "sudo *", "git push*", "gh auth*", "cline auth*", "cline update*"],
+          "allowRedirects": false
+        }
+      }
+    },
+    "source": "setups/<id>/global-settings.json and setup stamp"
+  },
+  "builder_capability": {
+    "projection": "cline-native-skills-agents-plugin-user-files",
+    "source_root": "plugins/nddev-builder",
+    "native_paths": ["skills", "agents", "plugins"],
+    "default_on": true,
+    "marketplace": null
+  },
+  "runtime_compatibility": {
+    "baseline_ref": "references/cline-baseline.json",
+    "version_ref": "build/version.json",
+    "cli_tested_version": "3.0.46",
+    "cli_package": "cline",
+    "cli_command": "cline",
+    "extension_tested_version": "4.0.11",
+    "vscode_extension_id": "saoudrizwan.claude-dev"
+  }
+}

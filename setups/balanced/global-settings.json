@@ -1,0 +1,47 @@
+{
+  "autoApprove": false,
+  "browser": {
+    "enabled": false
+  },
+  "checkpoint": {
+    "enabled": false
+  },
+  "cline": {
+    "autoUpdate": false,
+    "dataDir": "${CLINE_DATA_DIR}",
+    "plugins": {
+      "enabled": ["nddev-builder"]
+    }
+  },
+  "commandExecution": {
+    "autoApprove": false
+  },
+  "commandPermissions": {
+    "allow": ["git status*", "git diff*", "git log*", "npm test*", "python3 -m unittest*"],
+    "allowRedirects": false,
+    "deny": ["rm -rf *", "sudo *", "git push*", "gh auth*", "cline auth*"]
+  },
+  "dangerousActions": {
+    "allowed": false
+  },
+  "mcp": {
+    "servers": {}
+  },
+  "mode": "act",
+  "network": {
+    "allowRemoteMcp": false
+  },
+  "notifications": {
+    "enabled": false
+  },
+  "privacy": {
+    "shareTelemetry": false
+  },
+  "sandbox": {
+    "enabled": true,
+    "mode": "workspace"
+  },
+  "telemetry": {
+    "enabled": false
+  }
+}

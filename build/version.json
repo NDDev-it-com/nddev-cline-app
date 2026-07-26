@@ -1,4 +1,15 @@
 {
-  "schema_version": 1,
-  "build_version": "0.0.0"
+  "schema_version": 2,
+  "build_version": "0.1.0",
+  "cline_extension_tested": "4.0.11",
+  "cline_extension_release_tag": "v4.0.11",
+  "cline_extension_published_at": "2026-07-24T19:03:48Z",
+  "vscode_extension_id": "saoudrizwan.claude-dev",
+  "vscode_extension_vsix_sha256": "a4641d8bc47f766300203cee0c4e1d84f690a88586b43e81ed015bba9af79a2d",
+  "cline_cli_tested": "3.0.46",
+  "cline_cli_package": "cline",
+  "cline_cli_integrity": "sha512-U6uH3sLVvqx4fP65ejHkswhk3WvYOM2LCbQBX77Z7Tha4EX35vo2XZ51F6WnIiKlCAYZJ+YAEou2Yha/EAk+2A==",
+  "cline_cli_shasum": "5b731496d251f76448fe676edbf4fde415b58881",
+  "nddev_builder_extension_version": "0.1.0",
+  "runtime_baseline_ref": "references/cline-baseline.json"
 }

@@ -1,10 +1,112 @@
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "product_name": "nddev-cline-app",
   "github_repository": "NDDev-it-com/nddev-cline-app",
   "license": "AGPL-3.0-or-later",
-  "skeleton": {
-    "status": "skeleton",
-    "harness_id": "cline"
+  "setup_system": {
+    "manager": "cli-tools/nddev_cline.py",
+    "setup_ids": ["safe", "balanced", "full-auto"],
+    "explicit_absolute_target_required": true,
+    "builder_default_on": true,
+    "lifecycle": ["list", "status", "plan", "install", "switch", "restore", "remove", "software-status", "install-cli", "update-cli", "launch"]
+  },
+  "runtime_compatibility": {
+    "baseline_ref": "references/cline-baseline.json",
+    "version_ref": "build/version.json",
+    "cli_tested_version": "3.0.46",
+    "cli_package": "cline",
+    "cli_command": "cline",
+    "extension_tested_version": "4.0.11",
+    "vscode_extension_id": "saoudrizwan.claude-dev",
+    "documentation": [
+      "https://docs.cline.bot/getting-started/installing-cline",
+      "https://docs.cline.bot/getting-started/config",
+      "https://docs.cline.bot/cli/cli-reference",
+      "https://docs.cline.bot/customization/skills",
+      "https://docs.cline.bot/customization/plugins",
+      "https://docs.cline.bot/mcp/mcp-overview",
+      "https://github.com/cline/cline/releases/tag/v4.0.11",
+      "https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev"
+    ]
+  },
+  "builder_capability": {
+    "projection": "cline-native-skills-agents-plugin-user-files",
+    "source_root": "plugins/nddev-builder",
+    "version": "0.1.0",
+    "native_paths": [
+      "skills/nddev-builder/SKILL.md",
+      "data/settings/skills/nddev-builder/SKILL.md",
+      "agents/nddev-builder.md",
+      "plugins/nddev-builder/package.json",
+      "plugins/nddev-builder/index.js"
+    ],
+    "default_on": true,
+    "marketplace": null,
+    "marketplace_reason": "Cline documents plugin install sources and plugin directories, but no separate marketplace contract is required for this local target projection."
+  },
+  "runtime_launch": {
+    "command": "<absolute-target>/bin/cline",
+    "direct_command": "CLINE_DATA_DIR=<absolute-target>/data CLINE_COMMAND_PERMISSIONS=<setup-policy> <absolute-target>/bin/cline --data-dir <absolute-target> --config <absolute-target>/data/settings --hooks-dir <absolute-target>/hooks [setup launch args] [args...]",
+    "data_environment_variable": "CLINE_DATA_DIR",
+    "permissions_environment_variable": "CLINE_COMMAND_PERMISSIONS",
+    "executable_source": "validated-target-owned-npm-cline-tarball",
+    "extension_launch_supported": false,
+    "extension_install_supported": false,
+    "extension_install_reason": "VS Code extension installation and launch require editor-managed state and are deliberately out of scope for this target-only manager.",
+    "forwards_arguments": true,
+    "forwards_child_exit_code": true,
+    "json_manager_errors_supported": true,
+    "manager_command": "python3 cli-tools/nddev_cline.py launch --target <absolute-target> -- [args...]",
+    "requires_clean_managed_target": true,
+    "streams_child_stdio": true,
+    "successful_child_output_wrapped": false,
+    "environment_scope": "child-process-only",
+    "token_environment_inheritance": "stripped"
+  },
+  "command_policy": {
+    "json_supported": ["list", "status", "plan", "install", "switch", "restore", "remove", "software-status", "install-cli", "update-cli"],
+    "target_required": ["status", "plan", "install", "switch", "restore", "remove", "software-status", "install-cli", "update-cli", "launch"],
+    "plan_mutates": false,
+    "restore_backup_option": "--backup <0..9>"
+  },
+  "transaction_policy": {
+    "managed_file_mode": "0600",
+    "managed_directory_mode": "0700",
+    "new_target_mode": "0700",
+    "lock": "exclusive sibling directory",
+    "preserve_unmanaged_files": true,
+    "preserve_unmanaged_settings_keys": true,
+    "reject_symlink_targets": true,
+    "reject_symlink_managed_files": true,
+    "reject_hardlink_managed_files": true,
+    "bounded_reads": true,
+    "rollback_on_failure": true,
+    "target_bound_backups": true,
+    "backup_slots": 10
+  },
+  "software_install": {
+    "cli": {
+      "supported": true,
+      "tested_version": "3.0.46",
+      "source": "npm package cline with immutable integrity",
+      "package": "cline",
+      "integrity": "sha512-U6uH3sLVvqx4fP65ejHkswhk3WvYOM2LCbQBX77Z7Tha4EX35vo2XZ51F6WnIiKlCAYZJ+YAEou2Yha/EAk+2A==",
+      "layout": {
+        "visible_command": "bin/cline",
+        "software_manifest": "software/cline-cli.json"
+      }
+    },
+    "extension": {
+      "supported": false,
+      "tested_version": "4.0.11",
+      "vscode_extension_id": "saoudrizwan.claude-dev",
+      "vsix_sha256": "a4641d8bc47f766300203cee0c4e1d84f690a88586b43e81ed015bba9af79a2d",
+      "reason": "No live VS Code/Cline extension state is installed or launched by this manager."
+    },
+    "commands": {
+      "status": "python3 cli-tools/nddev_cline.py software-status --target <absolute-target> [--json]",
+      "install": "python3 cli-tools/nddev_cline.py install-cli --target <absolute-target> [--json]",
+      "update": "python3 cli-tools/nddev_cline.py update-cli --target <absolute-target> [--json]"
+    }
   }
 }

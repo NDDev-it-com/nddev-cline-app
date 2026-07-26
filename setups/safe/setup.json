@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "safe",
+  "description": "Plan-first Cline CLI setup: auto-approval is disabled and shell execution is denied by command policy.",
+  "managed_files": [
+    "data/settings/global-settings.json",
+    "data/settings/cline_mcp_settings.json",
+    "rules/nddev-managed.md"
+  ],
+  "builder_projection": "native-skills-agents-plugin-user-files",
+  "builder_default_on": true,
+  "launch_args": ["--plan", "--auto-approve", "false"]
+}
