@@ -27,6 +27,7 @@ VERSION = (ROOT / "VERSION").read_text(encoding="ascii").strip()
 PRODUCT_NAME = "nddev-cline-app"
 COMMAND_NAME = "cline"
 STAMP_NAME = "NDDEV-CLINE-SETUP.json"
+BACKUP_POOL_NAME = "NDDEV-CLINE-BACKUPS.json"
 BACKUP_NAME = "NDDEV-CLINE-BACKUP.json"
 BASELINE_REF = ROOT / "references" / "cline-baseline.json"
 TESTED_CLI_VERSION = "3.0.46"
@@ -129,6 +130,12 @@ BACKUP_KEYS = {
     "managed_files",
     "created_at",
 }
+BACKUP_POOL_KEYS = {
+    "schema_version",
+    "product_name",
+    "build_version",
+    "canonical_target",
+}
 TOKEN_ENV_NAMES = {
     "CLINE_API_KEY",
     "CLINE_AUTH_TOKEN",
@@ -143,6 +150,14 @@ TOKEN_ENV_NAMES = {
     "SSH_ASKPASS",
     "SSH_AUTH_SOCK",
     "GIT_ASKPASS",
+}
+BLOCKED_LAUNCH_FLAGS = {
+    "--auto-approve",
+    "--config",
+    "--data-dir",
+    "--hooks-dir",
+    "--key",
+    "-k",
 }
 
 
@@ -201,6 +216,13 @@ def require_directory(path: Path, label: str) -> os.stat_result:
         fail(f"{label} is missing")
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         fail(f"{label} must be a real directory")
+    return info
+
+
+def require_private_directory(path: Path, label: str) -> os.stat_result:
+    info = require_directory(path, label)
+    if not is_owner_private_directory(info):
+        fail(f"{label} must be owned by the current user with mode 0700")
     return info
 
 
@@ -488,6 +510,10 @@ def backup_pool(target: Path) -> Path:
     return target.parent / f".{target.name}.nddev-cline-backups"
 
 
+def backup_pool_marker(pool: Path) -> Path:
+    return pool / BACKUP_POOL_NAME
+
+
 def lock_path(target: Path) -> Path:
     return target.parent / f".{target.name}.nddev-cline.lock"
 
@@ -495,22 +521,28 @@ def lock_path(target: Path) -> Path:
 @contextlib.contextmanager
 def target_lock(target: Path) -> Iterator[None]:
     path = lock_path(target)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    require_private_directory(path.parent, "target lock parent")
+    created = False
     try:
         os.mkdir(path, OWNER_DIRECTORY_MODE)
     except FileExistsError:
         fail(f"target is locked: {path}")
+    except OSError as exc:
+        fail(f"cannot create target lock {path}: {exc}")
+    created = True
     try:
         yield
     finally:
-        with contextlib.suppress(FileNotFoundError):
+        with contextlib.suppress(FileNotFoundError, OSError):
+            if created:
+                require_private_directory(path, "target lock")
             path.rmdir()
 
 
 def require_explicit_absolute_target(raw_target: str | None) -> Path:
     if not raw_target:
         fail("an explicit --target absolute path is required")
-    target = Path(raw_target).expanduser()
+    target = Path(raw_target)
     if not target.is_absolute():
         fail("--target must be an absolute path")
     try:
@@ -525,13 +557,19 @@ def require_explicit_absolute_target(raw_target: str | None) -> Path:
 
 
 def ensure_target_directory(target: Path) -> Path:
-    if target.exists():
-        info = require_directory(target, "target")
-        if not is_owner_private_directory(info):
-            os.chmod(target, OWNER_DIRECTORY_MODE)
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        require_private_directory(target.parent, "target parent")
+        target.mkdir(mode=OWNER_DIRECTORY_MODE)
+        target.chmod(OWNER_DIRECTORY_MODE)
         return target.resolve()
-    require_directory(target.parent, "target parent")
-    target.mkdir(mode=OWNER_DIRECTORY_MODE)
+    if stat.S_ISLNK(info.st_mode):
+        fail("target must not be a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("target must be a directory")
+    if not is_owner_private_directory(info):
+        fail("target must be owned by the current user with mode 0700")
     return target.resolve()
 
 
@@ -546,9 +584,13 @@ def ensure_private_parent(target: Path, relative: Path) -> Path:
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
                 fail(f"managed parent {current.relative_to(target)} must be a real directory")
             if not is_owner_private_directory(info):
-                os.chmod(current, OWNER_DIRECTORY_MODE)
+                fail(
+                    f"managed parent {current.relative_to(target)} "
+                    "must be owned by the current user with mode 0700"
+                )
         else:
             current.mkdir(mode=OWNER_DIRECTORY_MODE)
+            current.chmod(OWNER_DIRECTORY_MODE)
     return target / relative
 
 
@@ -598,9 +640,16 @@ def validate_managed_files(target: Path, stamp: dict[str, Any]) -> list[str]:
 
 
 def inspect_target(target: Path) -> dict[str, Any]:
-    if not target.exists():
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
         return {"state": "missing", "target": str(target)}
-    require_directory(target, "target")
+    if stat.S_ISLNK(info.st_mode):
+        fail("target must not be a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("target must be a directory")
+    if not is_owner_private_directory(info):
+        fail("target must be owned by the current user with mode 0700")
     stamp = load_stamp(target)
     if stamp is None:
         if any_managed_path_exists(target):
@@ -706,25 +755,152 @@ def changed_paths(target: Path, desired: dict[Path, bytes | None]) -> list[str]:
     return sorted(changed)
 
 
-def refresh_backup_slot_numbers(pool: Path) -> None:
-    for slot in range(10):
-        envelope_path = pool / str(slot) / BACKUP_NAME
-        if not envelope_path.exists():
+def validate_backup_pool_marker(target: Path, pool: Path) -> None:
+    marker = load_json_object(
+        backup_pool_marker(pool),
+        "backup pool marker",
+        owner_only=True,
+    )
+    require_exact_keys(marker, BACKUP_POOL_KEYS, "backup pool marker")
+    if (
+        marker["schema_version"] != 1
+        or marker["product_name"] != PRODUCT_NAME
+        or marker["build_version"] != VERSION
+    ):
+        fail("backup pool marker is not compatible with this build")
+    if marker["canonical_target"] != str(target):
+        fail("backup pool is bound to a different canonical target")
+
+
+def write_backup_pool_marker(target: Path, pool: Path) -> None:
+    marker = {
+        "schema_version": 1,
+        "product_name": PRODUCT_NAME,
+        "build_version": VERSION,
+        "canonical_target": str(target),
+    }
+    marker_path = backup_pool_marker(pool)
+    marker_path.write_bytes(canonical_json(marker))
+    marker_path.chmod(OWNER_FILE_MODE)
+
+
+def require_backup_pool(target: Path) -> Path:
+    pool = backup_pool(target)
+    require_private_directory(pool, "backup pool")
+    validate_backup_pool_marker(target, pool)
+    return pool
+
+
+def ensure_backup_pool(target: Path) -> Path:
+    pool = backup_pool(target)
+    try:
+        info = pool.lstat()
+    except FileNotFoundError:
+        require_private_directory(target.parent, "backup pool parent")
+        pool.mkdir(mode=OWNER_DIRECTORY_MODE)
+        pool.chmod(OWNER_DIRECTORY_MODE)
+        write_backup_pool_marker(target, pool)
+        return pool
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        fail("backup pool must be a real directory")
+    if not is_owner_private_directory(info):
+        fail("backup pool must be owned by the current user with mode 0700")
+    validate_backup_pool_marker(target, pool)
+    return pool
+
+
+def validate_backup_envelope(
+    target: Path,
+    envelope: dict[str, Any],
+    label: str,
+    *,
+    expected_slot: int | None,
+) -> None:
+    require_exact_keys(envelope, BACKUP_KEYS, label)
+    if (
+        envelope["schema_version"] != 1
+        or envelope["product_name"] != PRODUCT_NAME
+        or envelope["build_version"] != VERSION
+    ):
+        fail(f"{label} is not compatible with this build")
+    slot = envelope["slot"]
+    if not isinstance(slot, int) or slot < 0 or slot > 9:
+        fail(f"{label} slot is invalid")
+    if expected_slot is not None and slot != expected_slot:
+        fail(f"{label} slot identity mismatch")
+    if envelope["canonical_target"] != str(target):
+        fail("backup belongs to a different canonical target")
+    if not isinstance(envelope["source_setup_id"], str):
+        fail(f"{label} source_setup_id must be a string")
+    validate_setup_id(envelope["source_setup_id"])
+    if not isinstance(envelope["created_at"], int):
+        fail(f"{label} created_at must be an integer")
+    raw_files = envelope["managed_files"]
+    if not isinstance(raw_files, list) or not all(isinstance(item, str) for item in raw_files):
+        fail(f"{label} managed_files must be a string array")
+    if len(raw_files) != len(set(raw_files)):
+        fail(f"{label} managed_files must be unique")
+    for raw_relative in raw_files:
+        relative = Path(raw_relative)
+        if relative.is_absolute() or ".." in relative.parts or relative == Path(STAMP_NAME):
+            fail(f"{label} contains an unsafe managed file path")
+
+
+def load_backup_envelope(
+    target: Path,
+    slot_dir: Path,
+    slot: int,
+    *,
+    expected_slot: int | None,
+) -> dict[str, Any]:
+    require_private_directory(slot_dir, f"backup slot {slot}")
+    envelope = load_json_object(
+        slot_dir / BACKUP_NAME,
+        f"backup slot {slot} envelope",
+        owner_only=True,
+    )
+    validate_backup_envelope(
+        target,
+        envelope,
+        f"backup slot {slot} envelope",
+        expected_slot=expected_slot,
+    )
+    return envelope
+
+
+def backup_slots_for_rotation(target: Path, pool: Path) -> list[int]:
+    slots: list[int] = []
+    for child in pool.iterdir():
+        if child.name == BACKUP_POOL_NAME:
             continue
-        envelope = load_json_object(envelope_path, f"backup slot {slot} envelope", owner_only=True)
+        if not child.name.isdigit():
+            fail("backup pool contains an unmanaged path")
+        slot = int(child.name)
+        if slot < 0 or slot > 9:
+            fail("backup pool contains a slot outside the 0-9 rotation window")
+        load_backup_envelope(target, child, slot, expected_slot=slot)
+        slots.append(slot)
+    return sorted(set(slots))
+
+
+def refresh_backup_slot_numbers(target: Path, pool: Path) -> None:
+    for slot in range(10):
+        slot_dir = pool / str(slot)
+        if not path_present(slot_dir):
+            continue
+        envelope = load_backup_envelope(target, slot_dir, slot, expected_slot=None)
         envelope["slot"] = slot
+        envelope_path = slot_dir / BACKUP_NAME
         envelope_path.write_bytes(canonical_json(envelope))
         envelope_path.chmod(OWNER_FILE_MODE)
 
 
 def create_backup(target: Path, state: dict[str, Any]) -> int:
-    pool = backup_pool(target)
-    pool.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-    for slot in range(9, -1, -1):
+    pool = ensure_backup_pool(target)
+    for slot in sorted(backup_slots_for_rotation(target, pool), reverse=True):
         current = pool / str(slot)
-        if not current.exists():
-            continue
         if slot == 9:
+            # The slot was just validated as a target-bound manager backup.
             shutil.rmtree(current)
         else:
             os.replace(current, pool / str(slot + 1))
@@ -736,8 +912,7 @@ def create_backup(target: Path, state: dict[str, Any]) -> int:
         content, _ = read_regular_file(
             target / relative, f"managed file {relative}", owner_only=True
         )
-        destination = slot_dir / relative
-        destination.parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+        destination = ensure_private_parent(slot_dir, relative)
         destination.write_bytes(content)
         destination.chmod(OWNER_FILE_MODE)
     envelope = {
@@ -752,28 +927,21 @@ def create_backup(target: Path, state: dict[str, Any]) -> int:
     }
     (slot_dir / BACKUP_NAME).write_bytes(canonical_json(envelope))
     (slot_dir / BACKUP_NAME).chmod(OWNER_FILE_MODE)
-    refresh_backup_slot_numbers(pool)
+    refresh_backup_slot_numbers(target, pool)
     return 0
 
 
 def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[Path, bytes]]:
     if slot < 0 or slot > 9:
         fail("--backup must be between 0 and 9")
-    slot_dir = backup_pool(target) / str(slot)
-    require_directory(slot_dir, f"backup slot {slot}")
-    envelope = load_json_object(slot_dir / BACKUP_NAME, "backup envelope", owner_only=True)
-    require_exact_keys(envelope, BACKUP_KEYS, "backup envelope")
-    if (
-        envelope["schema_version"] != 1
-        or envelope["product_name"] != PRODUCT_NAME
-        or envelope["build_version"] != VERSION
-    ):
-        fail("backup envelope is not compatible with this build")
-    if envelope["canonical_target"] != str(target):
-        fail("backup belongs to a different canonical target")
+    pool = require_backup_pool(target)
+    slot_dir = pool / str(slot)
+    envelope = load_backup_envelope(target, slot_dir, slot, expected_slot=slot)
     files: dict[Path, bytes] = {}
     for raw_relative in [*envelope["managed_files"], STAMP_NAME]:
         relative = Path(raw_relative)
+        if relative.is_absolute() or ".." in relative.parts:
+            fail("backup contains an unsafe managed file path")
         content, _ = read_regular_file(
             slot_dir / relative, f"backup file {relative}", owner_only=True
         )
@@ -816,7 +984,14 @@ def mutate_setup(target: Path, setup_id: str, operation: str) -> dict[str, Any]:
 
 
 def plan_setup(target: Path, setup_id: str) -> dict[str, Any]:
-    canonical_target = target.resolve() if target.exists() else target
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        canonical_target = target
+    else:
+        if stat.S_ISLNK(info.st_mode):
+            fail("target must not be a symlink")
+        canonical_target = target.resolve()
     state = inspect_target(canonical_target)
     existing_settings = read_existing_settings_if_managed(canonical_target, state)
     _metadata, desired = render_setup(setup_id, existing_settings=existing_settings)
@@ -1250,7 +1425,9 @@ def software_presence(target: Path) -> dict[str, Any]:
 
 
 def software_status(target: Path) -> dict[str, Any]:
-    if not target.exists():
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
         return {
             "ok": True,
             "installed": False,
@@ -1265,7 +1442,13 @@ def software_status(target: Path) -> dict[str, Any]:
             "extension_supported": False,
             "extension_installed": None,
         }
-    canonical_target = require_explicit_absolute_target(str(target))
+    if stat.S_ISLNK(info.st_mode):
+        fail("target must not be a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("target must be a directory")
+    if not is_owner_private_directory(info):
+        fail("target must be owned by the current user with mode 0700")
+    canonical_target = target.resolve()
     executable = cline_executable(canonical_target)
     manifest = software_manifest_path(canonical_target)
     presence = software_presence(canonical_target)
@@ -1595,7 +1778,20 @@ def write_stage_manifest(live_stage: Path) -> None:
 
 
 def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
-    canonical_target = ensure_target_directory(target)
+    if operation == "update-cli":
+        try:
+            info = target.lstat()
+        except FileNotFoundError:
+            fail("Cline CLI is not installed; use install-cli")
+        if stat.S_ISLNK(info.st_mode):
+            fail("target must not be a symlink")
+        if not stat.S_ISDIR(info.st_mode):
+            fail("target must be a directory")
+        if not is_owner_private_directory(info):
+            fail("target must be owned by the current user with mode 0700")
+        canonical_target = target.resolve()
+    else:
+        canonical_target = ensure_target_directory(target)
     with target_lock(canonical_target):
         status = software_status(canonical_target)
         if status["installed"] and status["current"]:
@@ -1690,28 +1886,41 @@ def isolated_child_environment(target: Path, command_permissions: dict[str, Any]
     return env
 
 
+def validate_launch_args(args: list[str]) -> None:
+    for arg in args:
+        flag = arg.split("=", 1)[0]
+        if flag in BLOCKED_LAUNCH_FLAGS or arg.startswith("-k=") or (
+            arg.startswith("-k") and arg != "-k" and not arg.startswith("--")
+        ):
+            fail(f"launch argument {flag!r} is managed by nddev-cline-app")
+
+
 def launch_cline(target: Path, args: list[str]) -> int:
+    validate_launch_args(args)
     canonical_target = require_explicit_absolute_target(str(target))
-    state = inspect_target(canonical_target)
-    if state["state"] != "managed":
-        fail("target is not managed by nddev-cline-app")
-    status = software_status(canonical_target)
-    if not status["installed"] or not status["current"]:
-        fail("Cline CLI is not installed at the tested version in this target")
-    child_args = [
-        *state["launch_args"],
-        "--data-dir",
-        str(canonical_target),
-        "--config",
-        str(canonical_target / "data" / "settings"),
-        "--hooks-dir",
-        str(canonical_target / "hooks"),
-        *args,
-    ]
+    with target_lock(canonical_target):
+        state = inspect_target(canonical_target)
+        if state["state"] != "managed":
+            fail("target is not managed by nddev-cline-app")
+        status = software_status(canonical_target)
+        if not status["installed"] or not status["current"]:
+            fail("Cline CLI is not installed at the tested version in this target")
+        child_args = [
+            *state["launch_args"],
+            "--data-dir",
+            str(canonical_target),
+            "--config",
+            str(canonical_target / "data" / "settings"),
+            "--hooks-dir",
+            str(canonical_target / "hooks"),
+            *args,
+        ]
+        executable = cline_executable(canonical_target)
+        child_env = isolated_child_environment(canonical_target, state["command_permissions"])
     completed = subprocess.run(
-        [str(cline_executable(canonical_target)), *child_args],
+        [str(executable), *child_args],
         cwd=os.getcwd(),
-        env=isolated_child_environment(canonical_target, state["command_permissions"]),
+        env=child_env,
         check=False,
         timeout=None,
     )

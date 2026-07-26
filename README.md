@@ -63,10 +63,16 @@ trust is limited to the official pinned `cline` package because registry
 metadata declares `postinstall` and platform optional dependencies. Existing or
 partial target-owned CLI software surfaces must use `update-cli` or repair;
 `install-cli` only accepts an absent software surface, and current installs are
-idempotent. `software-status` is read-only and validates the deterministic
+idempotent. `update-cli` on an absent target-owned CLI install is a deterministic
+domain failure with no target or parent artifacts created. `software-status` is
+read-only and validates the deterministic
 software manifest and tree digest without executing the target binary. The
 machine-owned bounds and measured baseline live in `build/manifest.json` under
 `software_lifecycle.bounds`.
+
+Setup backups live in a sibling pool marked by `NDDEV-CLINE-BACKUPS.json` and
+bound to the canonical target. A preexisting collision path without that marker
+is never removed or reused.
 
 Launch forwards stdio and the child exit code:
 
@@ -76,8 +82,11 @@ python3 cli-tools/nddev_cline.py launch --target /absolute/target -- "review thi
 
 The launched child receives isolated `HOME`, `USERPROFILE`, `CLINE_DATA_DIR`,
 `CLINE_SANDBOX_DATA_DIR`, XDG directories, and `CLINE_COMMAND_PERMISSIONS`
-values under the target. Provider tokens and Cline credential environment
-variables are stripped.
+values under the target. User-provided `--auto-approve`, `--data-dir`,
+`--config`, `--hooks-dir`, and `--key` overrides are rejected because those
+surfaces are manager-owned. Provider tokens and Cline credential environment
+variables are stripped. The launch preflight lock is released before the child
+process starts.
 
 ## Public validation
 
@@ -89,4 +98,4 @@ The validator is dependency-free and side-effect-free. It checks version/build
 metadata, release and npm integrity baselines, exact current Cline repo/docs and
 Bun docs surfaces, setup ids, command permission schemas, builder default-on
 projection, Bun install policy, unsupported extension install/launch contract,
-placeholder absence, and shared CI caller pins.
+unfinished-marker absence, and shared CI caller pins.

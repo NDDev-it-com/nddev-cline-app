@@ -30,6 +30,14 @@ EXPECTED = {
     "cli_version": "3.0.46",
     "cli_package": "cline",
     "cli_install_argv": ["bun", "add", "--global", "--exact", "--trust", "cline@3.0.46"],
+    "blocked_launch_flags": [
+        "--auto-approve",
+        "--config",
+        "--data-dir",
+        "--hooks-dir",
+        "--key",
+        "-k",
+    ],
     "cli_integrity": "sha512-U6uH3sLVvqx4fP65ejHkswhk3WvYOM2LCbQBX77Z7Tha4EX35vo2XZ51F6WnIiKlCAYZJ+YAEou2Yha/EAk+2A==",
     "cli_shasum": "5b731496d251f76448fe676edbf4fde415b58881",
     "extension_version": "4.0.11",
@@ -329,8 +337,10 @@ def validate_runtime_contract(errors: list[str]) -> None:
     manifest = read_json("build/manifest.json")
     launch = contract.get("runtime_launch")
     software = contract.get("software_install")
+    transaction = contract.get("transaction_policy")
     require(isinstance(launch, dict), "runtime_launch missing", errors)
     require(isinstance(software, dict), "software_install missing", errors)
+    require(isinstance(transaction, dict), "transaction_policy missing", errors)
     if isinstance(launch, dict):
         require(
             launch.get("extension_launch_supported") is False,
@@ -350,6 +360,42 @@ def validate_runtime_contract(errors: list[str]) -> None:
         require(
             launch.get("executable_source") == "validated-target-owned-bun-global-install",
             "runtime executable source mismatch",
+            errors,
+        )
+        require(
+            launch.get("blocks_user_managed_flags") == EXPECTED["blocked_launch_flags"],
+            "runtime launch managed flag blocklist mismatch",
+            errors,
+        )
+        require(
+            launch.get("lock_released_before_child") is True,
+            "runtime launch must release lock before child",
+            errors,
+        )
+    if isinstance(transaction, dict):
+        require(
+            transaction.get("backup_pool_marker") == "NDDEV-CLINE-BACKUPS.json",
+            "backup pool marker contract mismatch",
+            errors,
+        )
+        require(
+            transaction.get("preexisting_collision_paths_removed") is False,
+            "transaction policy must never remove preexisting collision paths",
+            errors,
+        )
+        require(
+            transaction.get("unique_transaction_directories") is True,
+            "transaction directories must be unique",
+            errors,
+        )
+        require(
+            transaction.get("fail_closed_dangling_symlinks") is True,
+            "dangling symlink policy missing",
+            errors,
+        )
+        require(
+            transaction.get("private_current_user_required") is True,
+            "private current-user policy missing",
             errors,
         )
     if isinstance(software, dict):
@@ -389,8 +435,17 @@ def validate_runtime_contract(errors: list[str]) -> None:
             )
             require(
                 cli.get("update_precondition")
-                == "installed or partial target-owned CLI software surface",
+                == "installed or partial target-owned CLI software surface; absent fails without side effects",
                 "CLI update precondition mismatch",
+                errors,
+            )
+            require(
+                cli.get("absent_update_policy")
+                == (
+                    "domain failure: Cline CLI is not installed; use install-cli; "
+                    "zero target or parent artifacts"
+                ),
+                "CLI absent update policy mismatch",
                 errors,
             )
             require(
@@ -454,8 +509,29 @@ def validate_runtime_contract(errors: list[str]) -> None:
         )
         require(
             lifecycle.get("update_precondition")
-            == "installed or partial target-owned CLI software surface",
+            == "installed or partial target-owned CLI software surface; absent fails without side effects",
             "manifest software update precondition mismatch",
+            errors,
+        )
+        require(
+            lifecycle.get("absent_update_policy")
+            == (
+                "domain failure: Cline CLI is not installed; use install-cli; "
+                "zero target or parent artifacts"
+            ),
+            "manifest absent update policy mismatch",
+            errors,
+        )
+        require(
+            lifecycle.get("preflight_policy")
+            == "lstat-no-follow current-user-private target and parent before Bun network",
+            "manifest software preflight policy mismatch",
+            errors,
+        )
+        require(
+            lifecycle.get("transaction_directories")
+            == "unique private mkdtemp staging with transaction-owned rollback",
+            "manifest transaction directory policy mismatch",
             errors,
         )
         require(

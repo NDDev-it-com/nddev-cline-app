@@ -67,7 +67,10 @@
     "install_environment": "minimal-allowlist-target-owned-bun-global",
     "status_validation": "manifest-tree-digest-no-exec",
     "install_precondition": "absent target-owned CLI software surface",
-    "update_precondition": "installed or partial target-owned CLI software surface",
+    "update_precondition": "installed or partial target-owned CLI software surface; absent fails without side effects",
+    "absent_update_policy": "domain failure: Cline CLI is not installed; use install-cli; zero target or parent artifacts",
+    "preflight_policy": "lstat-no-follow current-user-private target and parent before Bun network",
+    "transaction_directories": "unique private mkdtemp staging with transaction-owned rollback",
     "partial_state_policy": "install rejects any replace path or owned software parent; update may repair safe partial state",
     "current_idempotent": true,
     "bounds": {
