@@ -61,15 +61,43 @@ def validate_versions(errors: list[str]) -> None:
     require(contract.get("contract_version") == 2, "contract version mismatch", errors)
     require(build.get("build_version") == version, "build version mismatch", errors)
     require(manifest.get("build_version") == version, "manifest version mismatch", errors)
-    require(build.get("cline_cli_tested") == EXPECTED["cli_version"], "CLI version mismatch", errors)
-    require(build.get("cline_cli_package") == EXPECTED["cli_package"], "CLI package mismatch", errors)
-    require(build.get("cline_cli_integrity") == EXPECTED["cli_integrity"], "CLI integrity mismatch", errors)
+    require(
+        build.get("cline_cli_tested") == EXPECTED["cli_version"], "CLI version mismatch", errors
+    )
+    require(
+        build.get("cline_cli_package") == EXPECTED["cli_package"], "CLI package mismatch", errors
+    )
+    require(
+        build.get("cline_cli_integrity") == EXPECTED["cli_integrity"],
+        "CLI integrity mismatch",
+        errors,
+    )
     require(build.get("cline_cli_shasum") == EXPECTED["cli_shasum"], "CLI shasum mismatch", errors)
-    require(build.get("cline_extension_tested") == EXPECTED["extension_version"], "extension version mismatch", errors)
-    require(build.get("vscode_extension_id") == EXPECTED["extension_id"], "extension id mismatch", errors)
-    require(build.get("cline_extension_release_tag") == EXPECTED["release_tag"], "release tag mismatch", errors)
-    require(build.get("cline_extension_published_at") == EXPECTED["release_published_at"], "release published_at mismatch", errors)
-    require(build.get("vscode_extension_vsix_sha256") == EXPECTED["vsix_sha256"], "VSIX digest mismatch", errors)
+    require(
+        build.get("cline_extension_tested") == EXPECTED["extension_version"],
+        "extension version mismatch",
+        errors,
+    )
+    require(
+        build.get("vscode_extension_id") == EXPECTED["extension_id"],
+        "extension id mismatch",
+        errors,
+    )
+    require(
+        build.get("cline_extension_release_tag") == EXPECTED["release_tag"],
+        "release tag mismatch",
+        errors,
+    )
+    require(
+        build.get("cline_extension_published_at") == EXPECTED["release_published_at"],
+        "release published_at mismatch",
+        errors,
+    )
+    require(
+        build.get("vscode_extension_vsix_sha256") == EXPECTED["vsix_sha256"],
+        "VSIX digest mismatch",
+        errors,
+    )
     npm = baseline.get("npm")
     extension = baseline.get("extension")
     release = baseline.get("release")
@@ -77,22 +105,67 @@ def validate_versions(errors: list[str]) -> None:
     require(isinstance(extension, dict), "baseline extension missing", errors)
     require(isinstance(release, dict), "baseline release missing", errors)
     if isinstance(npm, dict):
-        require(npm.get("version") == build.get("cline_cli_tested"), "baseline npm version mismatch", errors)
-        require(npm.get("integrity") == build.get("cline_cli_integrity"), "baseline npm integrity mismatch", errors)
-        require(npm.get("shasum") == build.get("cline_cli_shasum"), "baseline npm shasum mismatch", errors)
+        require(
+            npm.get("version") == build.get("cline_cli_tested"),
+            "baseline npm version mismatch",
+            errors,
+        )
+        require(
+            npm.get("integrity") == build.get("cline_cli_integrity"),
+            "baseline npm integrity mismatch",
+            errors,
+        )
+        require(
+            npm.get("shasum") == build.get("cline_cli_shasum"),
+            "baseline npm shasum mismatch",
+            errors,
+        )
     if isinstance(extension, dict):
-        require(extension.get("id") == build.get("vscode_extension_id"), "baseline extension id mismatch", errors)
-        require(extension.get("version") == build.get("cline_extension_tested"), "baseline extension version mismatch", errors)
-        require(extension.get("install_supported_by_manager") is False, "extension install must be unsupported", errors)
-        require(extension.get("launch_supported_by_manager") is False, "extension launch must be unsupported", errors)
+        require(
+            extension.get("id") == build.get("vscode_extension_id"),
+            "baseline extension id mismatch",
+            errors,
+        )
+        require(
+            extension.get("version") == build.get("cline_extension_tested"),
+            "baseline extension version mismatch",
+            errors,
+        )
+        require(
+            extension.get("install_supported_by_manager") is False,
+            "extension install must be unsupported",
+            errors,
+        )
+        require(
+            extension.get("launch_supported_by_manager") is False,
+            "extension launch must be unsupported",
+            errors,
+        )
     if isinstance(release, dict):
-        require(release.get("tag") == build.get("cline_extension_release_tag"), "baseline release tag mismatch", errors)
-        require(release.get("assets", {}).get("vscode-vsix", {}).get("sha256") == build.get("vscode_extension_vsix_sha256"), "baseline VSIX digest mismatch", errors)
+        require(
+            release.get("tag") == build.get("cline_extension_release_tag"),
+            "baseline release tag mismatch",
+            errors,
+        )
+        require(
+            release.get("assets", {}).get("vscode-vsix", {}).get("sha256")
+            == build.get("vscode_extension_vsix_sha256"),
+            "baseline VSIX digest mismatch",
+            errors,
+        )
     runtime = contract.get("runtime_compatibility")
     require(isinstance(runtime, dict), "contract runtime_compatibility missing", errors)
     if isinstance(runtime, dict):
-        require(runtime.get("cli_tested_version") == build.get("cline_cli_tested"), "contract CLI version mismatch", errors)
-        require(runtime.get("extension_tested_version") == build.get("cline_extension_tested"), "contract extension version mismatch", errors)
+        require(
+            runtime.get("cli_tested_version") == build.get("cline_cli_tested"),
+            "contract CLI version mismatch",
+            errors,
+        )
+        require(
+            runtime.get("extension_tested_version") == build.get("cline_extension_tested"),
+            "contract extension version mismatch",
+            errors,
+        )
 
 
 def validate_command_permissions(value: Any, label: str, errors: list[str]) -> None:
@@ -101,11 +174,19 @@ def validate_command_permissions(value: Any, label: str, errors: list[str]) -> N
         return
     require(isinstance(value.get("allow"), list), f"{label} allow must be array", errors)
     require(isinstance(value.get("deny"), list), f"{label} deny must be array", errors)
-    require(isinstance(value.get("allowRedirects"), bool), f"{label} allowRedirects must be bool", errors)
+    require(
+        isinstance(value.get("allowRedirects"), bool),
+        f"{label} allowRedirects must be bool",
+        errors,
+    )
     for key in ("allow", "deny"):
         items = value.get(key)
         if isinstance(items, list):
-            require(all(isinstance(item, str) for item in items), f"{label} {key} must contain strings", errors)
+            require(
+                all(isinstance(item, str) for item in items),
+                f"{label} {key} must contain strings",
+                errors,
+            )
 
 
 def validate_setups(errors: list[str]) -> None:
@@ -127,15 +208,41 @@ def validate_setups(errors: list[str]) -> None:
         settings = read_json(f"setups/{setup_id}/global-settings.json")
         mcp = read_json(f"setups/{setup_id}/cline_mcp_settings.json")
         require(metadata.get("id") == setup_id, f"{setup_id} id mismatch", errors)
-        require(metadata.get("launch_args") == expected_args[setup_id], f"{setup_id} launch args mismatch", errors)
-        require(metadata.get("builder_default_on") is True, f"{setup_id} builder not default-on", errors)
-        require(metadata.get("builder_projection") == "native-skills-agents-plugin-user-files", f"{setup_id} builder projection mismatch", errors)
-        require(settings.get("cline", {}).get("autoUpdate") is False, f"{setup_id} autoupdate must be disabled", errors)
-        require(settings.get("cline", {}).get("dataDir") == "${CLINE_DATA_DIR}", f"{setup_id} dataDir mismatch", errors)
-        require(settings.get("cline", {}).get("plugins") == {"enabled": ["nddev-builder"]}, f"{setup_id} builder plugin not enabled", errors)
+        require(
+            metadata.get("launch_args") == expected_args[setup_id],
+            f"{setup_id} launch args mismatch",
+            errors,
+        )
+        require(
+            metadata.get("builder_default_on") is True, f"{setup_id} builder not default-on", errors
+        )
+        require(
+            metadata.get("builder_projection") == "native-skills-agents-plugin-user-files",
+            f"{setup_id} builder projection mismatch",
+            errors,
+        )
+        require(
+            settings.get("cline", {}).get("autoUpdate") is False,
+            f"{setup_id} autoupdate must be disabled",
+            errors,
+        )
+        require(
+            settings.get("cline", {}).get("dataDir") == "${CLINE_DATA_DIR}",
+            f"{setup_id} dataDir mismatch",
+            errors,
+        )
+        require(
+            settings.get("cline", {}).get("plugins") == {"enabled": ["nddev-builder"]},
+            f"{setup_id} builder plugin not enabled",
+            errors,
+        )
         require(settings.get("mcp") == {"servers": {}}, f"{setup_id} MCP must be empty", errors)
         require(mcp == {"mcpServers": {}}, f"{setup_id} MCP settings must be empty", errors)
-        require(settings.get("telemetry") == {"enabled": False}, f"{setup_id} telemetry must be off", errors)
+        require(
+            settings.get("telemetry") == {"enabled": False},
+            f"{setup_id} telemetry must be off",
+            errors,
+        )
         validate_command_permissions(settings.get("commandPermissions"), setup_id, errors)
 
 
@@ -146,12 +253,24 @@ def validate_builder(errors: list[str]) -> None:
     builder = contract.get("builder_capability")
     require(isinstance(builder, dict), "contract builder missing", errors)
     if isinstance(builder, dict):
-        require(builder.get("projection") == "cline-native-skills-agents-plugin-user-files", "builder projection mismatch", errors)
+        require(
+            builder.get("projection") == "cline-native-skills-agents-plugin-user-files",
+            "builder projection mismatch",
+            errors,
+        )
         require(builder.get("default_on") is True, "builder default_on mismatch", errors)
         require(builder.get("marketplace") is None, "builder marketplace must be null", errors)
-        require(builder.get("version") == build.get("nddev_builder_extension_version"), "builder version mismatch", errors)
+        require(
+            builder.get("version") == build.get("nddev_builder_extension_version"),
+            "builder version mismatch",
+            errors,
+        )
     require(package_json.get("name") == "nddev-builder", "builder package name mismatch", errors)
-    require(package_json.get("version") == build.get("nddev_builder_extension_version"), "builder package version mismatch", errors)
+    require(
+        package_json.get("version") == build.get("nddev_builder_extension_version"),
+        "builder package version mismatch",
+        errors,
+    )
     require("cline" in package_json, "builder package missing cline field", errors)
     for relative in (
         "plugins/nddev-builder/skills/nddev-builder/SKILL.md",
@@ -168,14 +287,34 @@ def validate_runtime_contract(errors: list[str]) -> None:
     require(isinstance(launch, dict), "runtime_launch missing", errors)
     require(isinstance(software, dict), "software_install missing", errors)
     if isinstance(launch, dict):
-        require(launch.get("extension_launch_supported") is False, "extension launch must be unsupported", errors)
-        require(launch.get("extension_install_supported") is False, "extension install must be unsupported", errors)
-        require(launch.get("token_environment_inheritance") == "stripped", "tokens must be stripped", errors)
+        require(
+            launch.get("extension_launch_supported") is False,
+            "extension launch must be unsupported",
+            errors,
+        )
+        require(
+            launch.get("extension_install_supported") is False,
+            "extension install must be unsupported",
+            errors,
+        )
+        require(
+            launch.get("token_environment_inheritance") == "stripped",
+            "tokens must be stripped",
+            errors,
+        )
     if isinstance(software, dict):
         cli = software.get("cli")
         extension = software.get("extension")
-        require(isinstance(cli, dict) and cli.get("supported") is True, "CLI install must be supported", errors)
-        require(isinstance(extension, dict) and extension.get("supported") is False, "extension install must be unsupported", errors)
+        require(
+            isinstance(cli, dict) and cli.get("supported") is True,
+            "CLI install must be supported",
+            errors,
+        )
+        require(
+            isinstance(extension, dict) and extension.get("supported") is False,
+            "extension install must be unsupported",
+            errors,
+        )
 
 
 def validate_current_sources(errors: list[str]) -> None:
