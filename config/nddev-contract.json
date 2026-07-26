@@ -1,0 +1,10 @@
+{
+  "contract_version": 1,
+  "product_name": "nddev-cline-app",
+  "github_repository": "NDDev-it-com/nddev-cline-app",
+  "license": "AGPL-3.0-or-later",
+  "skeleton": {
+    "status": "skeleton",
+    "harness_id": "cline"
+  }
+}
