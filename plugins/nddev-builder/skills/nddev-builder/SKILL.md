@@ -22,9 +22,12 @@ Start with the narrowest reference that matches the task:
 - Public validation workflow: `references/validation.md`
 
 Keep volatile facts code-owned. Versions, package integrity, optional package
-sets, launch constants, and managed file lists live in `references/cline-baseline.json`,
-`build/version.json`, `build/manifest.json`, `config/nddev-contract.json`, and
-`cli-tools/nddev_cline.py`.
+sets, launch constants, and managed file lists are owned by the public manager
+and release package, not by this installed skill. For a target, run the public
+manager `status` and `software-status` commands with `--json`. For source
+ownership, follow the manager and public build/contract files in the
+nddev-cline-app module checkout or release package instead of resolving module
+root files from this skill directory.
 
 Do not copy live Cline auth, editor state, provider credentials, npm tokens,
 runtime logs, caches, or private harness artifacts into the public module.

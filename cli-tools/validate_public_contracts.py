@@ -576,6 +576,7 @@ def validate_builder(errors: list[str]) -> None:
     contract = read_json("config/nddev-contract.json")
     build = read_json("build/version.json")
     package_json = read_json("plugins/nddev-builder/plugins/nddev-builder/package.json")
+    skill_root = ROOT / "plugins/nddev-builder/skills/nddev-builder"
     builder = contract.get("builder_capability")
     require(isinstance(builder, dict), "contract builder missing", errors)
     if isinstance(builder, dict):
@@ -602,6 +603,22 @@ def validate_builder(errors: list[str]) -> None:
     index = (ROOT / "plugins/nddev-builder/plugins/nddev-builder/index.js").read_text(encoding="utf-8")
     require("export default plugin" in index, "builder plugin must export an AgentPlugin object", errors)
     require("nddev_builder_read_reference" in index, "builder plugin missing regular-file adapter", errors)
+    local_reference_pattern = re.compile(r"`((?:\./)?references/[A-Za-z0-9._/-]+)`")
+    for markdown in sorted(skill_root.rglob("*.md")):
+        text = markdown.read_text(encoding="utf-8")
+        require(
+            "references/cline-baseline.json" not in text,
+            f"builder skill must not point at module-root volatile baseline: {markdown.relative_to(skill_root)}",
+            errors,
+        )
+        for match in local_reference_pattern.finditer(text):
+            candidate = match.group(1).removeprefix("./")
+            path = skill_root / candidate
+            require(
+                path.is_file(),
+                f"builder skill unresolved local reference {candidate}: {markdown.relative_to(skill_root)}",
+                errors,
+            )
 
 
 def validate_runtime_contract(errors: list[str]) -> None:
