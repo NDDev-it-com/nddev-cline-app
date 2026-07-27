@@ -6,9 +6,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -309,6 +311,7 @@ def validate_launch_profiles(errors: list[str]) -> None:
             require("CLINE_DATA_DIR" not in env, "full-auto must not set CLINE_DATA_DIR", errors)
             require("CLINE_SANDBOX" not in env, "full-auto must not set CLINE_SANDBOX", errors)
             require(env.get("HOME") == str(canonical_target / "home"), "full-auto HOME mismatch", errors)
+            require(env.get("PATH") == nddev_cline.DETERMINISTIC_PATH, "full-auto PATH must be deterministic", errors)
             require(
                 json.loads(env.get("CLINE_COMMAND_PERMISSIONS", "{}")) == {"allow": ["*"], "deny": [], "allowRedirects": True},
                 "full-auto command permissions env mismatch",
@@ -324,6 +327,7 @@ def validate_launch_profiles(errors: list[str]) -> None:
             require("--data-dir" in argv and str(canonical_target / nddev_cline.CLINE_SANDBOX_RELATIVE) in argv, "safe data-dir mismatch", errors)
             require(env.get("CLINE_SANDBOX") == "1", "safe must set CLINE_SANDBOX=1", errors)
             require("CLINE_DATA_DIR" not in env, "safe should let --data-dir drive data dir", errors)
+            require(env.get("PATH") == nddev_cline.DETERMINISTIC_PATH, "safe PATH must be deterministic", errors)
     finally:
         nddev_cline.software_status = original_status  # type: ignore[assignment]
         subprocess.run = original_run  # type: ignore[assignment]
@@ -337,6 +341,7 @@ def validate_npm_stage_and_timeout(errors: list[str]) -> None:
         stage.mkdir(mode=0o700)
         live.mkdir(mode=0o700)
         env, userconfig, globalconfig, global_dir = nddev_cline.install_stage_environment(stage, live)
+        require(env.get("PATH") == nddev_cline.DETERMINISTIC_PATH, "npm stage PATH must be deterministic", errors)
         require(env.get("NPM_CONFIG_PREFIX") == str(global_dir), "npm prefix env mismatch", errors)
         require(env.get("NPM_CONFIG_CACHE") == str(stage / "cache"), "npm cache env mismatch", errors)
         require(env.get("NPM_CONFIG_USERCONFIG") == str(userconfig), "npm userconfig env mismatch", errors)
@@ -376,6 +381,118 @@ def validate_npm_stage_and_timeout(errors: list[str]) -> None:
             require(nddev_cline.sha256_bytes(sentinel.read_bytes()) == sentinel_before, "npm timeout changed the existing runtime", errors)
         require(not nddev_cline.lock_path(target).exists(), "npm timeout left target lock behind", errors)
         require(not list(root.glob(".target.nddev-cline-cli-stage.*")), "npm timeout left staging directory behind", errors)
+
+
+def validate_security_smokes(errors: list[str]) -> None:
+    with tempfile.TemporaryDirectory(prefix="nddev-cline-security-") as raw_root:
+        root = Path(raw_root)
+        root.chmod(0o700)
+        world_target = root / "world-target"
+        world_target.mkdir(mode=0o777)
+        world_target.chmod(0o777)
+        observed_error: str | None = None
+        try:
+            nddev_cline.mutate_setup(world_target, "nddev-builder", "full-auto", "install")
+        except nddev_cline.ClineSetupError as exc:
+            observed_error = str(exc)
+        require(observed_error is not None and "mode 0700" in observed_error, "0777 target was not rejected", errors)
+
+        locked_target = root / "locked-target"
+        locked_target.mkdir(mode=0o700)
+        external_lock = root / "external-lock"
+        external_lock.write_text("sentinel\n", encoding="utf-8")
+        external_lock.chmod(0o600)
+        os.symlink(external_lock, nddev_cline.lock_path(locked_target))
+        observed_error = None
+        try:
+            nddev_cline.mutate_setup(locked_target, "nddev-builder", "full-auto", "install")
+        except nddev_cline.ClineSetupError as exc:
+            observed_error = str(exc)
+        require(observed_error is not None and "locked" in observed_error, "symlink lock path was not rejected", errors)
+        require(external_lock.read_text(encoding="utf-8") == "sentinel\n", "external lock target was changed", errors)
+
+        backup_target = root / "backup-target"
+        nddev_cline.mutate_setup(backup_target, "nddev-builder", "full-auto", "install")
+        external_backup = root / "external-backup"
+        external_backup.mkdir(mode=0o700)
+        os.symlink(external_backup, nddev_cline.backup_pool(backup_target.resolve()))
+        observed_error = None
+        try:
+            nddev_cline.mutate_setup(backup_target, "nddev-builder", "safe", "switch")
+        except nddev_cline.ClineSetupError as exc:
+            observed_error = str(exc)
+        require(observed_error is not None and "backup pool" in observed_error, "symlink backup pool was not rejected", errors)
+        require(external_backup.is_dir(), "external backup target was removed", errors)
+
+        sibling_target = root / "sibling-target"
+        nddev_cline.mutate_setup(sibling_target, "nddev-builder", "full-auto", "install")
+        sibling_pool = nddev_cline.legacy_backup_pool(sibling_target.resolve())
+        sibling_pool.mkdir(mode=0o700)
+        sibling_marker = sibling_pool / "external-marker"
+        sibling_marker.write_text("external\n", encoding="utf-8")
+        sibling_marker.chmod(0o600)
+        nddev_cline.mutate_setup(sibling_target, "nddev-builder", "safe", "switch")
+        require(sibling_marker.read_text(encoding="utf-8") == "external\n", "external sibling marker was changed", errors)
+        require(nddev_cline.backup_pool(sibling_target.resolve()).is_dir(), "target-internal backup pool missing", errors)
+
+    sticky_parent = Path(tempfile.gettempdir())
+    sticky_target = sticky_parent / f"nddev-cline-sticky-{os.getpid()}-{time.time_ns()}"
+    try:
+        nddev_cline.mutate_setup(sticky_target, "nddev-builder", "full-auto", "install")
+        state = nddev_cline.inspect_target(sticky_target.resolve())
+        require(state.get("state") == "managed", "sticky-temp target did not become managed", errors)
+    finally:
+        if sticky_target.exists() and not sticky_target.is_symlink() and sticky_target.is_dir():
+            shutil.rmtree(sticky_target)
+
+    with tempfile.TemporaryDirectory(prefix="nddev-cline-path-") as raw_root:
+        root = Path(raw_root)
+        fakebin = root / "fakebin"
+        fakebin.mkdir(mode=0o700)
+        fake_node = fakebin / "node"
+        fake_node.write_text("#!/bin/sh\necho fake\n", encoding="utf-8")
+        fake_node.chmod(0o700)
+        stage = root / "stage"
+        live = root / "live"
+        stage.mkdir(mode=0o700)
+        live.mkdir(mode=0o700)
+        env, _userconfig, _globalconfig, _global_dir = nddev_cline.install_stage_environment(stage, live)
+        observed: dict[str, Any] = {}
+
+        def fake_which(name: str, *, path: str | None = None) -> str:
+            observed.setdefault("which", []).append({"name": name, "path": path})
+            return f"/usr/bin/{name}"
+
+        def fake_process(
+            argv: list[str],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            label: str,
+            timeout: int = nddev_cline.PROCESS_TIMEOUT_SECONDS,
+        ) -> subprocess.CompletedProcess[str]:
+            del cwd, env, label, timeout
+            observed["argv"] = argv
+            return subprocess.CompletedProcess(argv, 0, "v20.0.0\n", "")
+
+        original_path = os.environ.get("PATH")
+        original_which = nddev_cline.shutil.which
+        original_process = nddev_cline.run_bounded_process
+        os.environ["PATH"] = str(fakebin)
+        nddev_cline.shutil.which = fake_which  # type: ignore[assignment]
+        nddev_cline.run_bounded_process = fake_process  # type: ignore[assignment]
+        try:
+            nddev_cline.require_node_preflight(env, stage)
+        finally:
+            if original_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = original_path
+            nddev_cline.shutil.which = original_which  # type: ignore[assignment]
+            nddev_cline.run_bounded_process = original_process  # type: ignore[assignment]
+        require(observed.get("argv", [None])[0] == "/usr/bin/node", "Node preflight did not use trusted absolute executable", errors)
+        which_calls = observed.get("which", [])
+        require(which_calls and which_calls[0].get("path") == nddev_cline.DETERMINISTIC_PATH, "trusted executable lookup used ambient PATH", errors)
 
 
 def validate_current_sources(errors: list[str]) -> None:
@@ -430,6 +547,7 @@ def main() -> int:
     validate_runtime_contract(errors)
     validate_launch_profiles(errors)
     validate_npm_stage_and_timeout(errors)
+    validate_security_smokes(errors)
     validate_current_sources(errors)
     validate_absence_of_placeholders(errors)
     validate_shared_ci(errors)

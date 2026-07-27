@@ -193,6 +193,13 @@ TOKEN_ENV_NAMES = {
     "SSH_AUTH_SOCK",
     "GIT_ASKPASS",
 }
+TRUSTED_TOOL_PATHS = (
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+)
+DETERMINISTIC_PATH = os.pathsep.join(TRUSTED_TOOL_PATHS)
 BLOCKED_LAUNCH_FLAGS = {
     "--auto-approve",
     "--config",
@@ -632,6 +639,10 @@ def list_profiles() -> list[dict[str, Any]]:
 
 
 def backup_pool(target: Path) -> Path:
+    return target / ".nddev-cline-backups"
+
+
+def legacy_backup_pool(target: Path) -> Path:
     return target.parent / f".{target.name}.nddev-cline-backups"
 
 
@@ -640,7 +651,7 @@ def backup_pool_marker(pool: Path) -> Path:
 
 
 def lock_path(target: Path) -> Path:
-    return target.parent / f".{target.name}.nddev-cline.lock"
+    return target / ".nddev-cline.lock"
 
 
 @contextlib.contextmanager
@@ -936,9 +947,17 @@ def write_backup_pool_marker(target: Path, pool: Path) -> None:
 
 def require_backup_pool(target: Path) -> Path:
     pool = backup_pool(target)
-    require_private_directory(pool, "backup pool")
-    validate_backup_pool_marker(target, pool)
-    return pool
+    if path_present(pool):
+        require_private_directory(pool, "backup pool")
+        validate_backup_pool_marker(target, pool)
+        return pool
+    legacy_pool = legacy_backup_pool(target)
+    if path_present(legacy_pool):
+        require_private_directory(target.parent, "legacy backup pool parent")
+        require_private_directory(legacy_pool, "legacy backup pool")
+        validate_backup_pool_marker(target, legacy_pool)
+        return legacy_pool
+    fail("backup pool is missing")
 
 
 def ensure_backup_pool(target: Path) -> Path:
@@ -1301,12 +1320,22 @@ def path_is_relative_to(path: Path, parent: Path) -> bool:
 
 
 def safe_child_base_environment() -> dict[str, str]:
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    env = {"PATH": DETERMINISTIC_PATH}
     for name in ("LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT", "ComSpec"):
         value = os.environ.get(name)
         if value:
             env[name] = value
     return env
+
+
+def trusted_executable(name: str) -> str:
+    resolved = shutil.which(name, path=DETERMINISTIC_PATH)
+    if resolved is None:
+        fail(f"{name} executable was not found on the trusted tool path")
+    path = Path(resolved)
+    if not path.is_absolute():
+        fail(f"{name} executable resolution was not absolute")
+    return str(path)
 
 
 def run_bounded_process(
@@ -1998,7 +2027,7 @@ def parse_node_major(version_output: str) -> int:
 
 def require_node_preflight(env: dict[str, str], stage_root: Path) -> dict[str, Any]:
     completed = run_bounded_process(
-        ["node", "--version"],
+        [trusted_executable("node"), "--version"],
         cwd=stage_root,
         env=env,
         label="Node.js preflight",
@@ -2041,13 +2070,13 @@ def verify_npm_registry_metadata(stage_root: Path, env: dict[str, str]) -> None:
     if not isinstance(npm, dict):
         fail("baseline npm metadata missing")
     version = npm_json(
-        ["npm", "view", NPM_PACKAGE_SPEC, "version", "--json"],
+        [trusted_executable("npm"), "view", NPM_PACKAGE_SPEC, "version", "--json"],
         cwd=stage_root,
         env=env,
         label="npm Cline CLI version metadata",
     )
     dist = npm_json(
-        ["npm", "view", NPM_PACKAGE_SPEC, "dist", "--json"],
+        [trusted_executable("npm"), "view", NPM_PACKAGE_SPEC, "dist", "--json"],
         cwd=stage_root,
         env=env,
         label="npm Cline CLI dist metadata",
@@ -2072,7 +2101,7 @@ def run_npm_install(stage_root: Path, live_stage: Path) -> dict[str, Any]:
     verify_npm_registry_metadata(stage_root, env)
     completed = run_bounded_process(
         [
-            "npm",
+            trusted_executable("npm"),
             "install",
             "--global",
             "--prefix",
@@ -2221,7 +2250,7 @@ def isolated_child_environment(
             "XDG_CONFIG_HOME": str(runtime / "xdg-config"),
             "XDG_CACHE_HOME": str(runtime / "xdg-cache"),
             "XDG_STATE_HOME": str(runtime / "xdg-state"),
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PATH": DETERMINISTIC_PATH,
         }
     )
     if profile_id == "safe":
