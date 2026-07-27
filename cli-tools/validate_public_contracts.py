@@ -24,6 +24,7 @@ SETUP_IDS = ["nddev-builder"]
 PROFILE_IDS = ["full-auto", "safe"]
 SHARED_CI_COMMIT = "2ccb80e96f5771b6a6b4eae63a4f47e232906dc7"
 SHARED_CI_VERSION = "0.12.0"
+RELEASE_WORKFLOW = ".github/workflows/release.yml"
 SHARED_CALLERS = {
     "actionlint.yml": ".github/workflows/actionlint.yml",
     "codeql.yml": ".github/workflows/public-codeql.yml",
@@ -33,6 +34,67 @@ SHARED_CALLERS = {
     "secret-scan.yml": ".github/workflows/secret-scan.yml",
     "zizmor.yml": ".github/workflows/zizmor-sarif.yml",
 }
+RELEASE_ARCHIVE_PATHS = [
+    "README.md",
+    "LICENSE",
+    "VERSION",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    ".github",
+    "build",
+    "cli-tools",
+    "config",
+    "plugins",
+    "profiles",
+    "references",
+    "setups",
+    "software",
+]
+RELEASE_RUNTIME_PATHS = [
+    "README.md",
+    "LICENSE",
+    "VERSION",
+    "build",
+    "cli-tools",
+    "config",
+    "plugins",
+    "profiles",
+    "references",
+    "setups",
+    "software",
+]
+REQUIRED_RELEASE_PERMISSIONS = {
+    "contents": "write",
+    "id-token": "write",
+    "attestations": "write",
+    "artifact-metadata": "write",
+}
+REQUIRED_RELEASE_INPUTS = {
+    "version",
+    "package_name",
+    "archive_paths",
+    "runtime_paths",
+}
+REQUIRED_CONTRACT_ROOTS = {
+    "build",
+    "cli-tools",
+    "config",
+    "plugins",
+    "profiles",
+    "references",
+    "setups",
+    "software",
+}
+PRIVATE_PATH_MARKERS = (
+    ".serena",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    "__pycache__",
+    "validation",
+    "tests",
+    "benchmarks",
+)
 EXPECTED = {
     "blocked_launch_flags": [
         "--auto-approve",
@@ -74,6 +136,46 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def tracked_files() -> set[str]:
+    completed = subprocess.run(
+        ["git", "ls-files"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=20,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stdout + completed.stderr)
+    return {line for line in completed.stdout.splitlines() if line}
+
+
+def _workflow_block(text: str, start: str) -> list[str]:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line == start:
+            block: list[str] = []
+            for candidate in lines[index + 1 :]:
+                if candidate and not candidate.startswith(" "):
+                    break
+                block.append(candidate)
+            return block
+    return []
+
+
+def _workflow_with_value(text: str, key: str) -> list[str]:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() == f"{key}: >-":
+            values: list[str] = []
+            for candidate in lines[index + 1 :]:
+                if not candidate.startswith("        "):
+                    break
+                values.extend(candidate.strip().split())
+            return values
+    return []
 
 
 def validate_versions(errors: list[str]) -> None:
@@ -864,6 +966,67 @@ def validate_shared_ci(errors: list[str]) -> None:
         require(text.count(expected) == 1, f"{filename} shared CI pin mismatch", errors)
 
 
+def validate_release_workflow(errors: list[str]) -> None:
+    tracked = tracked_files()
+    workflow = ROOT / RELEASE_WORKFLOW
+    require(RELEASE_WORKFLOW in tracked, "release workflow must be tracked", errors)
+    require(workflow.is_file(), "release workflow must exist", errors)
+    if not workflow.is_file():
+        return
+    text = workflow.read_text(encoding="utf-8")
+    expected_use = (
+        "uses: NDDev-it-com/ci-workflows/.github/workflows/"
+        f"release-supply-chain.yml@{SHARED_CI_COMMIT} # {SHARED_CI_VERSION}"
+    )
+    require(text.count(expected_use) == 1, "release workflow shared pin mismatch", errors)
+    require("permissions: {}" in text, "release workflow top-level permissions must be empty", errors)
+    publish_permissions = _workflow_block(text, "    permissions:")
+    for name, value in REQUIRED_RELEASE_PERMISSIONS.items():
+        require(
+            f"      {name}: {value}" in publish_permissions,
+            f"release workflow missing permission {name}: {value}",
+            errors,
+        )
+    with_block = _workflow_block(text, "    with:")
+    for name in REQUIRED_RELEASE_INPUTS:
+        require(
+            any(line.strip().startswith(f"{name}:") for line in with_block),
+            f"release workflow missing input {name}",
+            errors,
+        )
+    require(
+        any(line.strip() == "package_name: nddev-cline-app" for line in with_block),
+        "release workflow package_name mismatch",
+        errors,
+    )
+    archive_paths = _workflow_with_value(text, "archive_paths")
+    runtime_paths = _workflow_with_value(text, "runtime_paths")
+    require(archive_paths == RELEASE_ARCHIVE_PATHS, "release archive_paths mismatch", errors)
+    require(runtime_paths == RELEASE_RUNTIME_PATHS, "release runtime_paths mismatch", errors)
+    require(set(runtime_paths).issubset(set(archive_paths)), "runtime paths must be a subset of archive paths", errors)
+    require(REQUIRED_CONTRACT_ROOTS.issubset(set(archive_paths)), "archive paths missing contract roots", errors)
+    require(REQUIRED_CONTRACT_ROOTS.issubset(set(runtime_paths)), "runtime paths missing contract roots", errors)
+    for declared in [*archive_paths, *runtime_paths]:
+        path = ROOT / declared
+        require(path.exists(), f"release path does not exist: {declared}", errors)
+        covered = [
+            item
+            for item in tracked
+            if item == declared or item.startswith(f"{declared}/")
+        ]
+        require(bool(covered), f"release path has no tracked files: {declared}", errors)
+        for marker in PRIVATE_PATH_MARKERS:
+            require(
+                marker not in Path(declared).parts,
+                f"release path contains private marker {marker}: {declared}",
+                errors,
+            )
+    for item in sorted(tracked):
+        parts = Path(item).parts
+        for marker in PRIVATE_PATH_MARKERS:
+            require(marker not in parts, f"tracked public path contains private marker {marker}: {item}", errors)
+
+
 def main() -> int:
     errors: list[str] = []
     validate_versions(errors)
@@ -877,6 +1040,7 @@ def main() -> int:
     validate_current_sources(errors)
     validate_absence_of_placeholders(errors)
     validate_shared_ci(errors)
+    validate_release_workflow(errors)
     if errors:
         for error in errors:
             print(error)

@@ -25,7 +25,7 @@ jobs:
       package_name: nddev-cline-app
       archive_paths: >-
         README.md LICENSE VERSION CHANGELOG.md SECURITY.md .github build
-        cli-tools config plugins references setups software
+        cli-tools config plugins profiles references setups software
       runtime_paths: >-
-        README.md LICENSE VERSION build cli-tools config plugins references
-        setups software
+        README.md LICENSE VERSION build cli-tools config plugins profiles
+        references setups software
