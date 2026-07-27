@@ -70,6 +70,12 @@ software manifest and tree digest without executing the target binary. The
 machine-owned bounds and measured baseline live in `build/manifest.json` under
 `software_lifecycle.bounds`.
 
+The staged `cline --version` identity probe is fail-closed and bounded to 60
+seconds. Fresh macOS arm64 Bun stages measured 15.214 and 13.658 seconds; the
+machine-owned samples and timeout contract live in
+`references/cline-baseline.json`. A timeout aborts before the target software
+swap, so an existing install or partial repair surface remains unchanged.
+
 Setup backups live in a sibling pool marked by `NDDEV-CLINE-BACKUPS.json` and
 bound to the canonical target. A preexisting collision path without that marker
 is never removed or reused.

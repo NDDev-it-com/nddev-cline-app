@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,7 @@ EXPECTED = {
     "cli_version": "3.0.46",
     "cli_package": "cline",
     "cli_install_argv": ["bun", "add", "--global", "--exact", "--trust", "cline@3.0.46"],
+    "cli_version_probe_timeout_seconds": 60,
     "blocked_launch_flags": [
         "--auto-approve",
         "--config",
@@ -462,6 +465,18 @@ def validate_runtime_contract(errors: list[str]) -> None:
                 "CLI trusted lifecycle script policy missing",
                 errors,
             )
+            expected_version_probe = {
+                "argv": ["bin/cline", "--version"],
+                "environment": "native-minimal-isolated",
+                "timeout_seconds": EXPECTED["cli_version_probe_timeout_seconds"],
+                "timeout_policy": "fail-closed-before-software-swap",
+                "calibration_ref": "references/cline-baseline.json",
+            }
+            require(
+                cli.get("version_probe") == expected_version_probe,
+                "CLI version probe contract mismatch",
+                errors,
+            )
             bounds = cli.get("bounds")
             require(isinstance(bounds, dict), "CLI software bounds missing", errors)
             if isinstance(bounds, dict):
@@ -543,6 +558,18 @@ def validate_runtime_contract(errors: list[str]) -> None:
             "manifest software partial policy mismatch",
             errors,
         )
+        require(
+            lifecycle.get("version_probe")
+            == {
+                "argv": ["bin/cline", "--version"],
+                "environment": "native-minimal-isolated",
+                "timeout_seconds": EXPECTED["cli_version_probe_timeout_seconds"],
+                "timeout_policy": "fail-closed-before-software-swap",
+                "calibration_ref": "references/cline-baseline.json",
+            },
+            "manifest version probe contract mismatch",
+            errors,
+        )
         bounds = lifecycle.get("bounds")
         require(isinstance(bounds, dict), "manifest software bounds missing", errors)
         if isinstance(bounds, dict):
@@ -556,6 +583,121 @@ def validate_runtime_contract(errors: list[str]) -> None:
                 "manifest software byte bound mismatch",
                 errors,
             )
+
+
+def validate_version_probe_regression(errors: list[str]) -> None:
+    baseline = read_json("references/cline-baseline.json")
+    expected_timeout = EXPECTED["cli_version_probe_timeout_seconds"]
+    expected_baseline = {
+        "argv": ["cline", "--version"],
+        "environment": "native-minimal-isolated",
+        "production_timeout_seconds": expected_timeout,
+        "fail_closed_before_software_swap": True,
+        "calibration": {
+            "platform": "macos-arm64",
+            "package_manager": "bun",
+            "package_manager_version": "1.3.14",
+            "fresh_stage_samples_milliseconds": [15214, 13658],
+            "measured_max_milliseconds": 15214,
+        },
+    }
+    require(
+        baseline.get("cli", {}).get("version_probe") == expected_baseline,
+        "baseline version probe calibration mismatch",
+        errors,
+    )
+    require(
+        nddev_cline.VERSION_PROBE_TIMEOUT_SECONDS == expected_timeout,
+        "runtime version probe timeout mismatch",
+        errors,
+    )
+    require(
+        expected_timeout * 1000
+        >= 3 * expected_baseline["calibration"]["measured_max_milliseconds"],
+        "version probe timeout lacks three-times measured headroom",
+        errors,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="nddev-cline-public-regression-") as raw_root:
+        root = Path(raw_root)
+        executable = root / "cline"
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o700)
+        observed_timeouts: list[int] = []
+
+        def successful_probe(
+            argv: list[str],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            label: str,
+            timeout: int,
+        ) -> subprocess.CompletedProcess[str]:
+            del cwd, env, label
+            observed_timeouts.append(timeout)
+            return subprocess.CompletedProcess(argv, 0, "3.0.46\n", "")
+
+        original_bounded_process = nddev_cline.run_bounded_process
+        nddev_cline.run_bounded_process = successful_probe
+        try:
+            observed_version = nddev_cline.observed_cline_version(executable)
+        finally:
+            nddev_cline.run_bounded_process = original_bounded_process
+        require(observed_version == "3.0.46", "version probe regression output mismatch", errors)
+        require(
+            observed_timeouts == [expected_timeout],
+            "version probe did not use the calibrated timeout",
+            errors,
+        )
+
+        target = root / "target"
+        target.mkdir(mode=0o700)
+        target_bin = target / "bin"
+        target_bin.mkdir(mode=0o700)
+        sentinel = target_bin / "cline"
+        sentinel.write_bytes(b"preexisting-partial-runtime\n")
+        sentinel.chmod(0o700)
+        sentinel_before = nddev_cline.sha256_bytes(sentinel.read_bytes())
+        sentinel_mode_before = sentinel.stat().st_mode & 0o777
+        timeout_message = f"Cline CLI version probe timed out after {expected_timeout} seconds"
+
+        def timed_out_stage(stage_root: Path, live_stage: Path) -> None:
+            del stage_root, live_stage
+            raise nddev_cline.ClineSetupError(timeout_message)
+
+        original_bun_install = nddev_cline.run_bun_install
+        nddev_cline.run_bun_install = timed_out_stage
+        observed_error: str | None = None
+        try:
+            nddev_cline.install_or_update_cli(target, operation="update-cli")
+        except nddev_cline.ClineSetupError as exc:
+            observed_error = str(exc)
+        finally:
+            nddev_cline.run_bun_install = original_bun_install
+
+        require(observed_error == timeout_message, "version timeout did not fail closed", errors)
+        require(sentinel.is_file(), "version timeout removed the existing runtime", errors)
+        if sentinel.is_file():
+            require(
+                nddev_cline.sha256_bytes(sentinel.read_bytes()) == sentinel_before,
+                "version timeout changed the existing runtime",
+                errors,
+            )
+            require(
+                sentinel.stat().st_mode & 0o777 == sentinel_mode_before,
+                "version timeout changed the existing runtime mode",
+                errors,
+            )
+        require(
+            not nddev_cline.lock_path(target).exists(),
+            "version timeout left the target lock behind",
+            errors,
+        )
+        require(
+            not list(root.glob(".target.nddev-cline-cli-stage.*")),
+            "version timeout left a staging directory behind",
+            errors,
+        )
 
 
 def validate_current_sources(errors: list[str]) -> None:
@@ -615,6 +757,7 @@ def main() -> int:
     validate_setups(errors)
     validate_builder(errors)
     validate_runtime_contract(errors)
+    validate_version_probe_regression(errors)
     validate_current_sources(errors)
     validate_absence_of_placeholders(errors)
     validate_shared_ci(errors)

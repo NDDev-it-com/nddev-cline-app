@@ -139,6 +139,13 @@
       "absent_update_policy": "domain failure: Cline CLI is not installed; use install-cli; zero target or parent artifacts",
       "partial_state_policy": "install rejects any replace path or owned software parent; update may repair safe partial state",
       "current_idempotent": true,
+      "version_probe": {
+        "argv": ["bin/cline", "--version"],
+        "environment": "native-minimal-isolated",
+        "timeout_seconds": 60,
+        "timeout_policy": "fail-closed-before-software-swap",
+        "calibration_ref": "references/cline-baseline.json"
+      },
       "bounds": {
         "max_tree_paths": 50000,
         "max_tree_bytes": 536870912,
