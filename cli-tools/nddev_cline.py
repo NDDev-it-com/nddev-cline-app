@@ -1308,7 +1308,7 @@ def cline_executable(target: Path) -> Path:
 def require_supported_runtime_platform() -> None:
     if sys.platform.startswith(("darwin", "linux")):
         return
-    fail("nddev-cline-app 0.2.0 supports Cline CLI launch/install only on macOS and Linux")
+    fail(f"{PRODUCT_NAME} {VERSION} supports Cline CLI launch/install only on macOS and Linux")
 
 
 def path_is_relative_to(path: Path, parent: Path) -> bool:
