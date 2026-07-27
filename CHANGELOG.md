@@ -6,6 +6,8 @@
   lockfile into a target-owned staging project.
 - Add Node.js 20+ preflight, committed lock contract verification, and sanitized
   npm cache/config handling.
+- Disable npm lifecycle scripts and bin links for the target-owned CLI install
+  while preserving the committed lock and package wrapper launch path.
 - Replace setup variants with one `nddev-builder` content setup and orthogonal
   `full-auto` and `safe` profiles.
 - Make `full-auto` the default no-sandbox profile with native command

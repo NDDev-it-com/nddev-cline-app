@@ -90,10 +90,13 @@
       "https://registry.npmjs.org/",
       "--fund=false",
       "--audit=false",
-      "--ignore-scripts=false"
+      "--ignore-scripts=true",
+      "--bin-links=false"
     ],
     "install_environment": "minimal-allowlist-target-owned-npm-ci-project",
-    "lockfile_preflight": "parse committed package-lock.json: exact root dependency, registry-only resolved URLs, integrity for every non-link package, no file/git/remote escapes, expected Cline optional platform packages",
+    "lockfile_preflight": "parse committed package-lock.json: exact root dependency, registry-only resolved URLs, integrity for every non-link package, no file/git/remote escapes, Cline package wrapper bin mapping, expected Cline optional platform packages",
+    "lifecycle_scripts": "disabled",
+    "bin_links": "disabled",
     "node_preflight": "Node.js 20+ required; 22 recommended",
     "status_validation": "manifest-tree-digest-no-exec",
     "install_precondition": "absent target-owned CLI software surface",

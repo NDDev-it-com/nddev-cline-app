@@ -56,7 +56,8 @@
       "https://registry.npmjs.org/",
       "--fund=false",
       "--audit=false",
-      "--ignore-scripts=false"
+      "--ignore-scripts=true",
+      "--bin-links=false"
     ],
     "registry": "https://registry.npmjs.org/",
     "install_project_policy": "target-owned staged npm ci project only",

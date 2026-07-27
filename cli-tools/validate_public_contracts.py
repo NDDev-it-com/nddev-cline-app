@@ -47,6 +47,8 @@ EXPECTED = {
         "-k",
     ],
 }
+NPM_CI_REQUIRED_FLAGS = ["--ignore-scripts=true", "--bin-links=false"]
+NPM_CI_FORBIDDEN_FLAGS = ["--ignore-scripts=false", "--bin-links=true"]
 PLACEHOLDER_MARKER = "skele" + "ton"
 
 
@@ -94,6 +96,11 @@ def validate_versions(errors: list[str]) -> None:
     require(cli_version == nddev_cline.TESTED_CLI_VERSION, "manager CLI version mismatch", errors)
     require(cli_package == nddev_cline.NPM_PACKAGE, "manager CLI package mismatch", errors)
     require(extension_version == nddev_cline.TESTED_EXTENSION_VERSION, "manager extension version mismatch", errors)
+    install_env = build.get("npm_ci_lockfile_install_env")
+    require(isinstance(install_env, list), "build npm install env list missing", errors)
+    if isinstance(install_env, list):
+        require("NPM_CONFIG_IGNORE_SCRIPTS" in install_env, "build env must include NPM_CONFIG_IGNORE_SCRIPTS", errors)
+        require("NPM_CONFIG_BIN_LINKS" in install_env, "build env must include NPM_CONFIG_BIN_LINKS", errors)
     npm = baseline.get("npm")
     package_manager = baseline.get("package_manager")
     extension = baseline.get("extension")
@@ -123,6 +130,13 @@ def validate_versions(errors: list[str]) -> None:
             "official npm install argv mismatch",
             errors,
         )
+        managed_argv = package_manager.get("managed_install_argv")
+        require(isinstance(managed_argv, list) and managed_argv[0:2] == ["npm", "ci"], "managed npm install argv mismatch", errors)
+        if isinstance(managed_argv, list):
+            for flag in NPM_CI_REQUIRED_FLAGS:
+                require(flag in managed_argv, f"managed npm install argv missing {flag}", errors)
+            for flag in NPM_CI_FORBIDDEN_FLAGS:
+                require(flag not in managed_argv, f"managed npm install argv must not contain {flag}", errors)
     if isinstance(extension, dict):
         require(extension.get("id") == extension_id, "baseline extension id mismatch", errors)
         require(extension.get("version") == extension_version, "baseline extension version mismatch", errors)
@@ -212,6 +226,17 @@ def validate_install_lock_assets(errors: list[str]) -> None:
     require(isinstance(root, dict), "package-lock root package missing", errors)
     if isinstance(root, dict):
         require(root.get("dependencies") == expected_dependency, "package-lock root dependency mismatch", errors)
+    cline_package = packages.get("node_modules/cline")
+    require(isinstance(cline_package, dict), "package-lock cline package missing", errors)
+    if isinstance(cline_package, dict):
+        require(cline_package.get("version") == cli_version, "package-lock cline package version mismatch", errors)
+        require(cline_package.get("bin") == {nddev_cline.COMMAND_NAME: "bin/cline"}, "package-lock cline package wrapper bin mismatch", errors)
+        require(
+            cline_package.get("optionalDependencies")
+            == {package: cli_version for package in nddev_cline.EXPECTED_CLINE_OPTIONAL_PACKAGES},
+            "package-lock cline optional dependency map mismatch",
+            errors,
+        )
     optional_expected = set(baseline.get("npm", {}).get("optional_dependencies", {}))
     optional_seen: set[str] = set()
     for package_path, metadata in packages.items():
@@ -223,6 +248,16 @@ def validate_install_lock_assets(errors: list[str]) -> None:
         if package_name in optional_expected:
             optional_seen.add(package_name)
             require(metadata.get("version") == cli_version, f"optional package {package_name} version mismatch", errors)
+            native_contract = nddev_cline.SUPPORTED_NATIVE_OPTIONAL_PACKAGES.get(package_name)
+            if native_contract is not None:
+                require(metadata.get("optional") is True, f"optional package {package_name} must be optional", errors)
+                require(metadata.get("os") == native_contract["os"], f"optional package {package_name} os selector mismatch", errors)
+                require(metadata.get("cpu") == native_contract["cpu"], f"optional package {package_name} cpu selector mismatch", errors)
+                require(
+                    metadata.get("bin") == {nddev_cline.COMMAND_NAME: native_contract["bin"]},
+                    f"optional package {package_name} bin mapping mismatch",
+                    errors,
+                )
         resolved = metadata.get("resolved")
         if isinstance(resolved, str):
             require(resolved.startswith(nddev_cline.NPM_REGISTRY), f"non-registry resolved URL in lock: {package_path}", errors)
@@ -294,6 +329,17 @@ def validate_runtime_contract(errors: list[str]) -> None:
         require(launch.get("executable_source") == "validated-target-owned-npm-ci-lockfile-install", "runtime executable source mismatch", errors)
         require(launch.get("blocks_user_managed_flags") == EXPECTED["blocked_launch_flags"], "contract launch flag blocklist mismatch", errors)
         require("legacy" in launch.get("legacy_launch_policy", ""), "legacy launch policy missing", errors)
+        require("lock_released_before_child" not in launch, "legacy launch lock release flag must not be present", errors)
+        require(launch.get("target_lifecycle_lock") == "held-through-child-completion", "launch lock scope mismatch", errors)
+        lock_policy = launch.get("target_lifecycle_lock_policy")
+        require(
+            isinstance(lock_policy, str)
+            and "while target software is running" in lock_policy
+            and "restore" in lock_policy
+            and "update-cli" in lock_policy,
+            "launch lock policy must deny lifecycle mutations while software is running",
+            errors,
+        )
         require("--data-dir" not in launch.get("full_auto_command", ""), "full-auto command must not include --data-dir", errors)
         require("CLINE_SANDBOX" not in launch.get("full_auto_command", ""), "full-auto command must not set sandbox env", errors)
     if isinstance(software, dict):
@@ -306,6 +352,30 @@ def validate_runtime_contract(errors: list[str]) -> None:
             require(cli.get("registry") == nddev_cline.NPM_REGISTRY, "npm registry mismatch", errors)
             require(cli.get("lockfile_sha256") == build.get("cline_cli_lockfile_sha256"), "contract CLI lock digest mismatch", errors)
             require(cli.get("install_argv", [None])[0:2] == ["npm", "ci"], "contract install argv must use npm ci", errors)
+            install_argv = cli.get("install_argv")
+            require(isinstance(install_argv, list), "contract install argv must be a list", errors)
+            if isinstance(install_argv, list):
+                for flag in NPM_CI_REQUIRED_FLAGS:
+                    require(flag in install_argv, f"contract install argv missing {flag}", errors)
+                for flag in NPM_CI_FORBIDDEN_FLAGS:
+                    require(flag not in install_argv, f"contract install argv must not contain {flag}", errors)
+            lockfile_preflight = cli.get("lockfile_preflight")
+            require(
+                isinstance(lockfile_preflight, dict)
+                and lockfile_preflight.get("cline_package_wrapper_bin") == "bin/cline",
+                "contract lockfile preflight must check cline package wrapper bin mapping",
+                errors,
+            )
+            require(cli.get("lifecycle_scripts") == "disabled", "contract lifecycle script policy mismatch", errors)
+            require(cli.get("bin_links") == "disabled", "contract bin-links policy mismatch", errors)
+            environment_policy = cli.get("environment_policy")
+            require(isinstance(environment_policy, dict), "contract environment policy missing", errors)
+            if isinstance(environment_policy, dict):
+                required_env = environment_policy.get("required")
+                require(isinstance(required_env, list), "contract required env list missing", errors)
+                if isinstance(required_env, list):
+                    require("NPM_CONFIG_IGNORE_SCRIPTS" in required_env, "contract env must require NPM_CONFIG_IGNORE_SCRIPTS", errors)
+                    require("NPM_CONFIG_BIN_LINKS" in required_env, "contract env must require NPM_CONFIG_BIN_LINKS", errors)
             if isinstance(npm, dict):
                 registry_metadata = cli.get("registry_metadata", {})
                 require(registry_metadata.get("integrity") == npm.get("integrity"), "registry integrity mismatch", errors)
@@ -327,6 +397,15 @@ def validate_runtime_contract(errors: list[str]) -> None:
     if isinstance(lifecycle, dict):
         require(lifecycle.get("install_argv", [None])[0:2] == ["npm", "ci"], "manifest install argv must use npm ci", errors)
         require(lifecycle.get("lockfile_sha256") == build.get("cline_cli_lockfile_sha256"), "manifest lock digest mismatch", errors)
+        install_argv = lifecycle.get("install_argv")
+        require(isinstance(install_argv, list), "manifest install argv must be a list", errors)
+        if isinstance(install_argv, list):
+            for flag in NPM_CI_REQUIRED_FLAGS:
+                require(flag in install_argv, f"manifest install argv missing {flag}", errors)
+            for flag in NPM_CI_FORBIDDEN_FLAGS:
+                require(flag not in install_argv, f"manifest install argv must not contain {flag}", errors)
+        require(lifecycle.get("lifecycle_scripts") == "disabled", "manifest lifecycle script policy mismatch", errors)
+        require(lifecycle.get("bin_links") == "disabled", "manifest bin-links policy mismatch", errors)
         expected_node_preflight = (
             f"Node.js {nddev_cline.MIN_NODE_MAJOR}+ required; "
             f"{nddev_cline.RECOMMENDED_NODE_MAJOR} recommended"
@@ -433,11 +512,88 @@ def validate_npm_stage_and_timeout(errors: list[str]) -> None:
         require(env.get("NPM_CONFIG_CACHE") == str(stage / "cache"), "npm cache env mismatch", errors)
         require(env.get("NPM_CONFIG_USERCONFIG") == str(userconfig), "npm userconfig env mismatch", errors)
         require(env.get("NPM_CONFIG_GLOBALCONFIG") == str(globalconfig), "npm globalconfig env mismatch", errors)
+        require(env.get("NPM_CONFIG_IGNORE_SCRIPTS") == "true", "npm stage must disable lifecycle scripts via env", errors)
+        require(env.get("NPM_CONFIG_BIN_LINKS") == "false", "npm stage must disable npm bin links via env", errors)
         require("CLINE_DATA_DIR" not in env and "CLINE_SANDBOX" not in env, "npm stage must not set Cline runtime env", errors)
         npmrc = userconfig.read_text(encoding="utf-8")
+        npmrc_settings = dict(
+            line.split("=", 1)
+            for line in npmrc.splitlines()
+            if line and not line.lstrip().startswith("#") and "=" in line
+        )
         require(f"registry={nddev_cline.NPM_REGISTRY}" in npmrc, "npmrc registry mismatch", errors)
         require("prefix=" not in npmrc, "npmrc must not set a global prefix", errors)
+        require(npmrc_settings.get("ignore-scripts") == "true", "npmrc must disable lifecycle scripts", errors)
+        require(npmrc_settings.get("bin-links") == "false", "npmrc must disable npm bin links", errors)
+        require("ignore-scripts=false" not in npmrc, "npmrc must not enable lifecycle scripts", errors)
+        require("bin-links=true" not in npmrc, "npmrc must not enable npm bin links", errors)
         require("auth" not in npmrc.lower() and "token" not in npmrc.lower(), "npmrc must not contain auth material", errors)
+        package_wrapper = live / nddev_cline.PACKAGE_WRAPPER_RELATIVE
+        package_wrapper.parent.mkdir(mode=0o700, parents=True)
+        package_wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        package_wrapper.chmod(0o755)
+        require(not (live / nddev_cline.INSTALL_PROJECT_RELATIVE / "node_modules" / ".bin" / nddev_cline.COMMAND_NAME).exists(), "test setup must not create npm .bin link", errors)
+        nddev_cline.normalize_stage_executable(live)
+        visible_wrapper = live / "bin" / nddev_cline.COMMAND_NAME
+        require(visible_wrapper.is_file(), "visible Cline wrapper was not created", errors)
+        visible_text = visible_wrapper.read_text(encoding="utf-8")
+        require("node_modules/.bin" not in visible_text, "visible wrapper must not rely on npm .bin links", errors)
+        require(str(Path("..") / nddev_cline.PACKAGE_WRAPPER_RELATIVE) in visible_text, "visible wrapper must invoke package wrapper", errors)
+        captured_npm: dict[str, Any] = {}
+
+        def fake_trusted_executable(name: str) -> str:
+            return f"/trusted/{name}"
+
+        def fake_bounded_process(
+            argv: list[str],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            label: str,
+            timeout: int = nddev_cline.PROCESS_TIMEOUT_SECONDS,
+        ) -> subprocess.CompletedProcess[str]:
+            del timeout
+            if label == "Node.js preflight":
+                return subprocess.CompletedProcess(argv, 0, "v22.0.0\n", "")
+            if label == "npm Cline CLI locked install":
+                captured_npm["argv"] = argv
+                captured_npm["cwd"] = str(cwd)
+                captured_npm["env"] = env
+                generated_wrapper = live_install / nddev_cline.PACKAGE_WRAPPER_RELATIVE
+                generated_wrapper.parent.mkdir(mode=0o700, parents=True)
+                generated_wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                generated_wrapper.chmod(0o755)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if label == "Cline CLI version probe":
+                return subprocess.CompletedProcess(argv, 0, f"{nddev_cline.TESTED_CLI_VERSION}\n", "")
+            raise AssertionError(f"unexpected bounded process label: {label}")
+
+        stage_install = root / "stage-install"
+        live_install = root / "live-install"
+        stage_install.mkdir(mode=0o700)
+        live_install.mkdir(mode=0o700)
+        original_trusted_executable = nddev_cline.trusted_executable
+        original_bounded_process = nddev_cline.run_bounded_process
+        try:
+            nddev_cline.trusted_executable = fake_trusted_executable  # type: ignore[assignment]
+            nddev_cline.run_bounded_process = fake_bounded_process  # type: ignore[assignment]
+            nddev_cline.run_npm_install(stage_install, live_install)
+        finally:
+            nddev_cline.trusted_executable = original_trusted_executable  # type: ignore[assignment]
+            nddev_cline.run_bounded_process = original_bounded_process  # type: ignore[assignment]
+        npm_argv = captured_npm.get("argv")
+        require(isinstance(npm_argv, list), "npm install argv was not captured", errors)
+        if isinstance(npm_argv, list):
+            for flag in NPM_CI_REQUIRED_FLAGS:
+                require(flag in npm_argv, f"manager npm install argv missing {flag}", errors)
+            for flag in NPM_CI_FORBIDDEN_FLAGS:
+                require(flag not in npm_argv, f"manager npm install argv must not contain {flag}", errors)
+        require(captured_npm.get("cwd") == str(live_install / nddev_cline.INSTALL_PROJECT_RELATIVE), "manager npm install cwd mismatch", errors)
+        npm_env = captured_npm.get("env")
+        require(isinstance(npm_env, dict), "npm install env was not captured", errors)
+        if isinstance(npm_env, dict):
+            require(npm_env.get("NPM_CONFIG_IGNORE_SCRIPTS") == "true", "manager npm env must disable lifecycle scripts", errors)
+            require(npm_env.get("NPM_CONFIG_BIN_LINKS") == "false", "manager npm env must disable bin links", errors)
         require(nddev_cline.parse_node_major("v20.19.0") == 20, "Node parser mismatch", errors)
         target = root / "target"
         target.mkdir(mode=0o700)

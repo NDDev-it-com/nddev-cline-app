@@ -47,6 +47,12 @@ EXPECTED_CLINE_OPTIONAL_PACKAGES = {
     "@cline/cli-windows-arm64",
     "@cline/cli-windows-x64",
 }
+SUPPORTED_NATIVE_OPTIONAL_PACKAGES = {
+    "@cline/cli-darwin-arm64": {"os": ["darwin"], "cpu": ["arm64"], "bin": "bin/cline"},
+    "@cline/cli-darwin-x64": {"os": ["darwin"], "cpu": ["x64"], "bin": "bin/cline"},
+    "@cline/cli-linux-arm64": {"os": ["linux"], "cpu": ["arm64"], "bin": "bin/cline"},
+    "@cline/cli-linux-x64": {"os": ["linux"], "cpu": ["x64"], "bin": "bin/cline"},
+}
 MIN_NODE_MAJOR = 20
 RECOMMENDED_NODE_MAJOR = 22
 DEFAULT_SETUP_ID = "nddev-builder"
@@ -1376,6 +1382,17 @@ def validate_install_lock_contract() -> None:
     root = packages.get("")
     if not isinstance(root, dict) or root.get("dependencies") != dependencies:
         fail("Cline CLI package-lock root dependency mismatch")
+    cline_package = packages.get("node_modules/cline")
+    if not isinstance(cline_package, dict):
+        fail("Cline CLI package-lock missing cline package metadata")
+    if cline_package.get("version") != TESTED_CLI_VERSION:
+        fail("Cline CLI package-lock cline package version mismatch")
+    if cline_package.get("bin") != {COMMAND_NAME: "bin/cline"}:
+        fail("Cline CLI package wrapper bin mapping mismatch")
+    if cline_package.get("optionalDependencies") != {
+        package: TESTED_CLI_VERSION for package in EXPECTED_CLINE_OPTIONAL_PACKAGES
+    }:
+        fail("Cline CLI package optional native dependency mapping mismatch")
     optional_seen: set[str] = set()
     for path, metadata in packages.items():
         if not isinstance(path, str) or not isinstance(metadata, dict):
@@ -1387,6 +1404,16 @@ def validate_install_lock_contract() -> None:
             optional_seen.add(name)
             if metadata.get("version") != TESTED_CLI_VERSION:
                 fail(f"Cline CLI optional package {name} version mismatch")
+            native_contract = SUPPORTED_NATIVE_OPTIONAL_PACKAGES.get(name)
+            if native_contract is not None:
+                if metadata.get("optional") is not True:
+                    fail(f"Cline CLI optional package {name} must be marked optional")
+                if metadata.get("os") != native_contract["os"]:
+                    fail(f"Cline CLI optional package {name} os selector mismatch")
+                if metadata.get("cpu") != native_contract["cpu"]:
+                    fail(f"Cline CLI optional package {name} cpu selector mismatch")
+                if metadata.get("bin") != {COMMAND_NAME: native_contract["bin"]}:
+                    fail(f"Cline CLI optional package {name} bin mapping mismatch")
         resolved = metadata.get("resolved")
         if isinstance(resolved, str):
             if not resolved.startswith(NPM_REGISTRY):
@@ -1861,7 +1888,8 @@ def write_npm_config(stage_root: Path, cache: Path) -> tuple[Path, Path]:
         "fund=false\n"
         "audit=false\n"
         "update-notifier=false\n"
-        "ignore-scripts=false\n"
+        "ignore-scripts=true\n"
+        "bin-links=false\n"
     )
     userconfig.write_text(config, encoding="utf-8")
     globalconfig.write_text("", encoding="utf-8")
@@ -1908,6 +1936,8 @@ def install_stage_environment(stage_root: Path, live_stage: Path) -> tuple[dict[
             "NPM_CONFIG_FUND": "false",
             "NPM_CONFIG_AUDIT": "false",
             "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+            "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+            "NPM_CONFIG_BIN_LINKS": "false",
             "NO_UPDATE_NOTIFIER": "1",
         }
     )
@@ -1929,19 +1959,11 @@ def seed_locked_install_project(project_dir: Path) -> None:
 def normalize_stage_executable(live_stage: Path) -> None:
     executable = live_stage / "bin" / COMMAND_NAME
     package_wrapper = live_stage / PACKAGE_WRAPPER_RELATIVE
-    npm_bin = live_stage / INSTALL_PROJECT_RELATIVE / "node_modules" / ".bin" / COMMAND_NAME
     require_safe_executable(
         package_wrapper,
         live_stage,
         "Cline package wrapper",
         allow_hardlinks=False,
-        owner_only_mode=False,
-    )
-    require_safe_executable(
-        npm_bin,
-        live_stage,
-        "npm local Cline CLI executable",
-        allow_hardlinks=True,
         owner_only_mode=False,
     )
     try:
@@ -2162,53 +2184,6 @@ def require_node_preflight(env: dict[str, str], stage_root: Path) -> dict[str, A
     }
 
 
-def npm_json(
-    argv: list[str],
-    *,
-    cwd: Path,
-    env: dict[str, str],
-    label: str,
-) -> Any:
-    completed = run_bounded_process(argv, cwd=cwd, env=env, label=label)
-    if completed.returncode != 0:
-        fail(f"{label} failed")
-    try:
-        return json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        fail(f"{label} did not return JSON: {exc}")
-
-
-def verify_npm_registry_metadata(stage_root: Path, env: dict[str, str]) -> None:
-    baseline = load_baseline()
-    npm = baseline.get("npm")
-    if not isinstance(npm, dict):
-        fail("baseline npm metadata missing")
-    version = npm_json(
-        [trusted_executable("npm"), "view", NPM_PACKAGE_SPEC, "version", "--json"],
-        cwd=stage_root,
-        env=env,
-        label="npm Cline CLI version metadata",
-    )
-    dist = npm_json(
-        [trusted_executable("npm"), "view", NPM_PACKAGE_SPEC, "dist", "--json"],
-        cwd=stage_root,
-        env=env,
-        label="npm Cline CLI dist metadata",
-    )
-    if version != TESTED_CLI_VERSION:
-        fail(f"registry returned Cline CLI {version!r}, expected {TESTED_CLI_VERSION}")
-    if not isinstance(dist, dict):
-        fail("registry Cline CLI dist metadata must be an object")
-    expected = {
-        "integrity": npm.get("integrity"),
-        "shasum": npm.get("shasum"),
-        "tarball": npm.get("tarball"),
-    }
-    for key, expected_value in expected.items():
-        if not isinstance(expected_value, str) or dist.get(key) != expected_value:
-            fail(f"registry Cline CLI dist.{key} does not match the pinned baseline")
-
-
 def run_npm_install(stage_root: Path, live_stage: Path) -> dict[str, Any]:
     env, userconfig, globalconfig, project_dir = install_stage_environment(stage_root, live_stage)
     validate_install_lock_contract()
@@ -2228,7 +2203,8 @@ def run_npm_install(stage_root: Path, live_stage: Path) -> dict[str, Any]:
             NPM_REGISTRY,
             "--fund=false",
             "--audit=false",
-            "--ignore-scripts=false",
+            "--ignore-scripts=true",
+            "--bin-links=false",
         ],
         cwd=project_dir,
         env=env,

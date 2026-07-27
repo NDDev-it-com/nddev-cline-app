@@ -77,9 +77,9 @@ python3 cli-tools/nddev_cline.py update-cli --target /absolute/target --json
 `install-cli` uses `npm ci` from the committed public package lock in a clean
 target-owned staging project with isolated cache, npmrc, global npmrc, `HOME`,
 temp directory, and XDG directories. It preflights Node.js, validates the lock
-digest and package-lock shape against `references/cline-baseline.json`, runs the
-official Cline lifecycle scripts only after frozen resolution, probes
-`cline --version`, writes a software manifest, and swaps the software surface
+digest and package-lock shape against `references/cline-baseline.json`, disables
+npm lifecycle scripts and bin links, probes `cline --version` through the
+package wrapper, writes a software manifest, and swaps the software surface
 atomically.
 
 `software-status` is read-only and validates the manifest and tree digest
@@ -94,6 +94,11 @@ python3 cli-tools/nddev_cline.py launch --target /absolute/target -- "review thi
 Caller-supplied posture, path, and auth override flags are rejected before
 launch. Provider tokens, npm tokens, Cline credential environment variables,
 and editor state are stripped from child environments.
+
+During launch the manager holds the exclusive target lifecycle lock until the
+child Cline process completes and lock cleanup is restored. Target lifecycle
+mutations, including install, switch, migrate, restore, remove, install-cli,
+and update-cli, are denied while target software is running.
 
 Legacy 0.1.0 managed targets may be inspected, migrated, restored, or removed.
 They are never launched.

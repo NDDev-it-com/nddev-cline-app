@@ -94,8 +94,8 @@
       "--zen",
       "-k"
     ],
-    "preflight_lock": "held until child argv and environment are prepared",
-    "lock_released_before_child": true,
+    "target_lifecycle_lock": "held-through-child-completion",
+    "target_lifecycle_lock_policy": "The exclusive target lifecycle lock is acquired before launch preflight and remains held until the child Cline process completes and lock cleanup is restored; install, switch, migrate, restore, remove, install-cli, update-cli, and other target lifecycle mutations are denied while target software is running.",
     "streams_child_stdio": true,
     "successful_child_output_wrapped": false,
     "environment_scope": "child-process-only",
@@ -183,12 +183,14 @@
         "https://registry.npmjs.org/",
         "--fund=false",
         "--audit=false",
-        "--ignore-scripts=false"
+        "--ignore-scripts=true",
+        "--bin-links=false"
       ],
       "lockfile_preflight": {
         "root_dependency": "cline@3.0.46",
         "registry_only_resolved_urls": true,
         "integrity_required_for_non_link_packages": true,
+        "cline_package_wrapper_bin": "bin/cline",
         "expected_optional_platform_packages": [
           "@cline/cli-darwin-arm64",
           "@cline/cli-darwin-x64",
@@ -198,6 +200,8 @@
           "@cline/cli-windows-x64"
         ]
       },
+      "lifecycle_scripts": "disabled",
+      "bin_links": "disabled",
       "registry_metadata": {
         "package": "cline",
         "version": "3.0.46",
@@ -218,7 +222,9 @@
           "NPM_CONFIG_USERCONFIG",
           "NPM_CONFIG_GLOBALCONFIG",
           "NPM_CONFIG_CACHE",
-          "NPM_CONFIG_REGISTRY"
+          "NPM_CONFIG_REGISTRY",
+          "NPM_CONFIG_IGNORE_SCRIPTS",
+          "NPM_CONFIG_BIN_LINKS"
         ],
         "forbidden": [
           "NODE_AUTH_TOKEN",
