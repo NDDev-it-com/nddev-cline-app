@@ -39,7 +39,7 @@ SHARED_CALLERS = {
 }
 RELEASE_ARCHIVE_PATHS = [
     "AGENTS.md",
-    "CLAUDE.md",
+    ".claude/CLAUDE.md",
     "README.md",
     "LICENSE",
     "VERSION",
@@ -93,7 +93,7 @@ REQUIRED_CONTRACT_ROOTS = {
 }
 REQUIRED_GOVERNANCE_ARCHIVE_PATHS = {
     "AGENTS.md",
-    "CLAUDE.md",
+    ".claude/CLAUDE.md",
     ".gds/repository.yaml",
 }
 PRIVATE_PATH_MARKERS = (
@@ -1669,11 +1669,15 @@ def validate_release_workflow(errors: list[str]) -> None:
 
 
 def validate_claude_bridge(errors: list[str]) -> None:
-    bridge = ROOT / "CLAUDE.md"
-    require(bridge.is_file(), "CLAUDE.md bridge must exist", errors)
+    bridge = ROOT / ".claude" / "CLAUDE.md"
+    require(bridge.is_file(), ".claude/CLAUDE.md bridge must exist", errors)
     if bridge.exists():
-        validate_no_symlinks_under(bridge, "CLAUDE.md bridge", errors)
-        require(bridge.read_bytes() == b"@AGENTS.md\n", "CLAUDE.md bridge must exactly import AGENTS.md", errors)
+        validate_no_symlinks_under(bridge, ".claude/CLAUDE.md bridge", errors)
+        require(
+            bridge.read_bytes() == b"@../AGENTS.md\n",
+            ".claude/CLAUDE.md bridge must exactly import AGENTS.md",
+            errors,
+        )
 
 
 def main() -> int:

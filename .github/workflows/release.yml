@@ -24,9 +24,9 @@ jobs:
       version: ${{ github.ref_name }}
       package_name: nddev-cline-app
       archive_paths: >-
-        AGENTS.md CLAUDE.md README.md LICENSE VERSION CHANGELOG.md SECURITY.md
-        .gds/repository.yaml .github build cli-tools config plugins profiles
-        references setups software
+        AGENTS.md .claude/CLAUDE.md README.md LICENSE VERSION CHANGELOG.md
+        SECURITY.md .gds/repository.yaml .github build cli-tools config plugins
+        profiles references setups software
       runtime_paths: >-
         README.md LICENSE VERSION build cli-tools config plugins profiles
         references setups software
