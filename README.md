@@ -101,16 +101,22 @@ mutations, including install, switch, migrate, restore, remove, install-cli,
 and update-cli, are denied while target software is running.
 
 The launch handoff is a write-protected verified-path handoff. The manager
-holds a persistent target-internal lock file with `fcntl.flock` inside a
-dedicated lock directory, temporarily removes owner-write permission only from
-that lock directory and immutable target-owned executable/software artifact
+first holds a persistent external bootstrap `fcntl.flock` file under the fixed
+system temp root (`/private/tmp` on macOS, `/tmp` on Linux) in a private
+per-product/per-UID lock root, then holds a persistent target-internal lock file
+inside a dedicated lock directory. Lock acquisition order is external first,
+internal second; release order is internal first, external last. The external
+lock file is never removed on normal release or setup removal. During launch
+the manager temporarily removes owner-write permission only from the internal
+lock directory and immutable target-owned executable/software artifact
 directories, checks that the software manifest is current before protection,
 revalidates entrypoint and package-wrapper identities plus `O_NOFOLLOW`
 SHA-256 byte digests immediately before spawning the target-owned executable,
 then restores modes after the child exits. The managed target root, runtime
 `HOME`, config, temp, XDG, runtime, and sandbox directories remain writable for
 Cline runtime state. This is not portable fd execution; without a native
-sandbox it does not claim resistance to deliberate same-UID `chmod` attacks.
+sandbox it does not claim resistance to deliberate same-UID tampering of the
+bootstrap lock root or deliberate same-UID `chmod` attacks.
 
 Legacy 0.1.0 managed targets may be inspected, migrated, restored, or removed.
 They are never launched.

@@ -105,7 +105,7 @@
     "preflight_policy": "lstat-no-follow current-user-private target and parent before npm registry/install work",
     "transaction_directories": "unique private mkdtemp staging with transaction-owned rollback",
     "partial_state_policy": "install rejects any replace path or owned software parent; update may repair safe partial state",
-    "launch_handoff_policy": "target-internal O_NOFOLLOW fcntl lock file below a dedicated lock directory held through child completion; only the lock directory and immutable executable/software artifact directories are temporarily read/execute-only while mutable target, HOME, config, TMP, XDG, runtime, and sandbox directories stay writable; manifest is current before protection; entrypoint and package-wrapper identities plus O_NOFOLLOW SHA-256 byte digests are revalidated immediately before path-based spawn",
+    "launch_handoff_policy": "persistent external/bootstrap O_NOFOLLOW fcntl lock file under fixed system temp per-product/per-UID private root held through full lifecycle, plus target-internal O_NOFOLLOW fcntl lock file below a dedicated lock directory held through child completion; acquisition external first/internal second and release internal first/external last; only the internal lock directory and immutable executable/software artifact directories are temporarily read/execute-only while mutable target, HOME, config, TMP, XDG, runtime, and sandbox directories stay writable; manifest is current before protection; entrypoint and package-wrapper identities plus O_NOFOLLOW SHA-256 byte digests are revalidated immediately before path-based spawn",
     "current_idempotent": true,
     "version_probe": {
       "argv": ["bin/cline", "--version"],

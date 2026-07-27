@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import hashlib
 import os
 import re
+import select
 import shutil
 import stat
 import subprocess
@@ -118,6 +120,12 @@ EXPECTED = {
 }
 NPM_CI_REQUIRED_FLAGS = ["--ignore-scripts=true", "--bin-links=false"]
 NPM_CI_FORBIDDEN_FLAGS = ["--ignore-scripts=false", "--bin-links=true"]
+FORBIDDEN_BOOTSTRAP_OVERRIDE_NAMES = (
+    "NDDEV_CLINE_BOOTSTRAP_ROOT",
+    "NDDEV_CLINE_LOCK_ROOT",
+    "CLINE_BOOTSTRAP_LOCK_ROOT",
+    "CLINE_LOCK_ROOT",
+)
 PLACEHOLDER_MARKER = "skele" + "ton"
 
 
@@ -131,6 +139,128 @@ def read_json(relative: str) -> dict[str, Any]:
 def require(condition: bool, message: str, errors: list[str]) -> None:
     if not condition:
         errors.append(message)
+
+
+def current_uid() -> int | str:
+    if hasattr(os, "geteuid"):
+        return os.geteuid()
+    if hasattr(os, "getuid"):
+        return os.getuid()
+    return "unknown"
+
+
+def bootstrap_product_root(system_root: Path) -> Path:
+    return system_root / f".{nddev_cline.PRODUCT_NAME}-{current_uid()}-lifecycle-locks"
+
+
+def path_identity(path: Path) -> tuple[int, int, int, int, int, int] | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_size,
+    )
+
+
+def real_bootstrap_snapshot(path: Path) -> dict[str, Any]:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return {"exists": False}
+    snapshot: dict[str, Any] = {
+        "exists": True,
+        "root": path_identity(path),
+        "entries": [],
+    }
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        return snapshot
+    entries = sorted(path.iterdir(), key=lambda item: item.name)
+    if len(entries) > 1000:
+        snapshot["too_many_entries"] = len(entries)
+        return snapshot
+    for child in entries:
+        child_info = child.lstat()
+        record: dict[str, Any] = {
+            "name": child.name,
+            "identity": path_identity(child),
+            "type": "other",
+        }
+        if stat.S_ISREG(child_info.st_mode) and child_info.st_size <= nddev_cline.METADATA_MAX_BYTES:
+            record["type"] = "file"
+            record["sha256"] = sha256_file(child)
+        elif stat.S_ISDIR(child_info.st_mode):
+            record["type"] = "directory"
+        elif stat.S_ISLNK(child_info.st_mode):
+            record["type"] = "symlink"
+            record["target"] = os.readlink(child)
+        snapshot["entries"].append(record)
+    return snapshot
+
+
+def write_pipe_json(fd: int, payload: dict[str, Any]) -> None:
+    os.write(fd, (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def read_pipe_json(fd: int, label: str, errors: list[str], *, timeout_seconds: float = 5.0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    chunks: list[bytes] = []
+    while time.monotonic() < deadline:
+        readable, _writable, _errors = select.select([fd], [], [], max(0.0, deadline - time.monotonic()))
+        if not readable:
+            continue
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        if b"\n" in chunk:
+            break
+    content = b"".join(chunks).split(b"\n", 1)[0]
+    if not content:
+        require(False, f"{label} did not report before timeout", errors)
+        return {}
+    try:
+        value = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        require(False, f"{label} reported invalid JSON: {exc}", errors)
+        return {}
+    if not isinstance(value, dict):
+        require(False, f"{label} report must be an object", errors)
+        return {}
+    return value
+
+
+def wait_child_success(pid: int, label: str, errors: list[str]) -> None:
+    observed, status = os.waitpid(pid, 0)
+    require(observed == pid, f"{label} waitpid returned the wrong child", errors)
+    require(os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, f"{label} failed", errors)
+
+
+@contextlib.contextmanager
+def isolated_bootstrap_root(errors: list[str]) -> Any:
+    original = nddev_cline.fixed_system_temp_root
+    real_root = original()
+    real_product_root = bootstrap_product_root(real_root)
+    before = real_bootstrap_snapshot(real_product_root)
+    with tempfile.TemporaryDirectory(prefix="nddev-cline-bootstrap-root-") as raw:
+        injected = Path(raw)
+        injected.chmod(0o1777)
+
+        def injected_fixed_system_temp_root() -> Path:
+            return injected
+
+        nddev_cline.fixed_system_temp_root = injected_fixed_system_temp_root
+        try:
+            yield injected
+        finally:
+            nddev_cline.fixed_system_temp_root = original
+    after = real_bootstrap_snapshot(real_product_root)
+    require(before == after, "public validator touched the real system bootstrap lock root", errors)
 
 
 def expected_managed_files() -> set[str]:
@@ -515,6 +645,13 @@ def validate_runtime_contract(errors: list[str]) -> None:
             require("not portable fd execution" in lock_policy, "launch policy must not claim portable fd execution", errors)
             require("same-UID chmod" in lock_policy, "launch policy must disclose same-UID chmod boundary", errors)
             require("dedicated target-internal lock directory" in lock_policy, "launch policy must use a dedicated lock directory", errors)
+            require("external/bootstrap" in lock_policy, "launch policy must use an external bootstrap lock", errors)
+            require("fixed resolved system temp root" in lock_policy, "launch policy must bind bootstrap lock to fixed system temp", errors)
+            require("never removed on normal release" in lock_policy, "launch policy must keep bootstrap lock persistent", errors)
+            require("external first and internal second" in lock_policy, "launch policy must document lock acquisition order", errors)
+            require("internal first and external last" in lock_policy, "launch policy must document lock release order", errors)
+            require("renames the internal lock directory" in lock_policy, "launch policy must cover internal lock directory rename", errors)
+            require("bootstrap lock root" in lock_policy, "launch policy must disclose bootstrap root same-UID boundary", errors)
             require("target root, HOME, config, TMP, XDG, runtime, and sandbox directories remain writable" in lock_policy, "launch policy must preserve runtime writability", errors)
         require("--data-dir" not in launch.get("full_auto_command", ""), "full-auto command must not include --data-dir", errors)
         require("CLINE_SANDBOX" not in launch.get("full_auto_command", ""), "full-auto command must not set sandbox env", errors)
@@ -591,6 +728,9 @@ def validate_runtime_contract(errors: list[str]) -> None:
         require(
             isinstance(handoff, str)
             and "path-based spawn" in handoff
+            and "external/bootstrap" in handoff
+            and "fixed system temp" in handoff
+            and "acquisition external first/internal second" in handoff
             and "mutable target, HOME, config, TMP, XDG, runtime, and sandbox directories stay writable" in handoff,
             "manifest launch handoff policy mismatch",
             errors,
@@ -600,6 +740,222 @@ def validate_runtime_contract(errors: list[str]) -> None:
         if isinstance(bounds, dict):
             require(bounds.get("max_tree_paths") == nddev_cline.SOFTWARE_TREE_MAX_PATHS, "software path bound mismatch", errors)
             require(bounds.get("max_tree_bytes") == nddev_cline.SOFTWARE_TREE_MAX_BYTES, "software byte bound mismatch", errors)
+
+
+def validate_bootstrap_lock_contract(errors: list[str]) -> None:
+    source = (ROOT / "cli-tools/nddev_cline.py").read_text(encoding="utf-8")
+    expected_root = Path("/private/tmp").resolve() if sys.platform.startswith("darwin") else Path("/tmp").resolve()
+    observed_root = nddev_cline.fixed_system_temp_root()
+    require(observed_root == expected_root, "bootstrap lock root must use the fixed system temp root", errors)
+    try:
+        info = observed_root.lstat()
+    except FileNotFoundError:
+        require(False, "bootstrap fixed system temp root is missing", errors)
+    else:
+        require(stat.S_ISDIR(info.st_mode), "bootstrap fixed system temp root must be a directory", errors)
+        require(not stat.S_ISLNK(info.st_mode), "bootstrap fixed system temp root must not be a symlink", errors)
+        require(bool(stat.S_IMODE(info.st_mode) & stat.S_ISVTX), "bootstrap fixed system temp root must be sticky", errors)
+    require("gettempdir(" not in source, "bootstrap lock root must not use tempfile.gettempdir", errors)
+    for name in FORBIDDEN_BOOTSTRAP_OVERRIDE_NAMES:
+        require(name not in source, f"public bootstrap override must not exist: {name}", errors)
+
+
+def lock_identity_payload(canonical_target: Path) -> dict[str, Any]:
+    path = nddev_cline.bootstrap_lock_path(canonical_target)
+    info = path.lstat()
+    return {
+        "path": str(path),
+        "dev": info.st_dev,
+        "ino": info.st_ino,
+        "mode": stat.S_IMODE(info.st_mode),
+        "nlink": info.st_nlink,
+    }
+
+
+def validate_bootstrap_lock_handover(errors: list[str]) -> None:
+    require(hasattr(os, "fork"), "bootstrap lock handover smoke requires POSIX fork", errors)
+    if not hasattr(os, "fork"):
+        return
+    with tempfile.TemporaryDirectory(prefix="nddev-cline-lock-handover-") as raw:
+        root = Path(raw)
+        root.chmod(0o700)
+        target = root / "target"
+        with nddev_cline.bootstrap_lifecycle_lock(target) as canonical_target:
+            lock_path = nddev_cline.bootstrap_lock_path(canonical_target)
+            initial_identity = path_identity(lock_path)
+        a_ready_r, a_ready_w = os.pipe()
+        a_release_r, a_release_w = os.pipe()
+        b_blocked_r, b_blocked_w = os.pipe()
+        b_ready_r, b_ready_w = os.pipe()
+        b_release_r, b_release_w = os.pipe()
+        c_ready_r, c_ready_w = os.pipe()
+
+        pid_a = os.fork()
+        if pid_a == 0:
+            try:
+                os.close(a_ready_r)
+                os.close(a_release_w)
+                with nddev_cline.bootstrap_lifecycle_lock(target) as canonical:
+                    write_pipe_json(a_ready_w, {"ok": True, **lock_identity_payload(canonical)})
+                    os.read(a_release_r, 1)
+                os._exit(0)
+            except BaseException as exc:
+                with contextlib.suppress(OSError):
+                    write_pipe_json(a_ready_w, {"ok": False, "error": str(exc)})
+                os._exit(1)
+        os.close(a_ready_w)
+        os.close(a_release_r)
+        a_report = read_pipe_json(a_ready_r, "bootstrap actor A", errors)
+        os.close(a_ready_r)
+        require(a_report.get("ok") is True, "bootstrap actor A did not acquire lock", errors)
+        require(a_report.get("mode") == 0o600, "bootstrap actor A lock mode mismatch", errors)
+        require(a_report.get("nlink") == 1, "bootstrap actor A lock link count mismatch", errors)
+
+        pid_b = os.fork()
+        if pid_b == 0:
+            try:
+                os.close(b_blocked_r)
+                os.close(b_ready_r)
+                os.close(b_release_w)
+                reported_blocked = False
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    try:
+                        with nddev_cline.bootstrap_lifecycle_lock(target) as canonical:
+                            write_pipe_json(
+                                b_ready_w,
+                                {
+                                    "ok": True,
+                                    "blocked_first": reported_blocked,
+                                    **lock_identity_payload(canonical),
+                                },
+                            )
+                            os.read(b_release_r, 1)
+                            os._exit(0)
+                    except nddev_cline.ClineSetupError as exc:
+                        if "locked" not in str(exc):
+                            raise
+                        if not reported_blocked:
+                            write_pipe_json(b_blocked_w, {"ok": True, "error": str(exc)})
+                            reported_blocked = True
+                        time.sleep(0.025)
+                write_pipe_json(b_ready_w, {"ok": False, "error": "timed out waiting for handover"})
+                os._exit(1)
+            except BaseException as exc:
+                with contextlib.suppress(OSError):
+                    write_pipe_json(b_ready_w, {"ok": False, "error": str(exc)})
+                os._exit(1)
+        os.close(b_blocked_w)
+        os.close(b_ready_w)
+        os.close(b_release_r)
+        b_blocked = read_pipe_json(b_blocked_r, "bootstrap actor B blocked attempt", errors)
+        os.close(b_blocked_r)
+        require(b_blocked.get("ok") is True and "locked" in str(b_blocked.get("error")), "bootstrap actor B did not observe A lock", errors)
+        os.write(a_release_w, b"1")
+        os.close(a_release_w)
+        wait_child_success(pid_a, "bootstrap actor A", errors)
+        b_report = read_pipe_json(b_ready_r, "bootstrap actor B", errors)
+        os.close(b_ready_r)
+        require(b_report.get("ok") is True, "bootstrap actor B did not acquire after handover", errors)
+        require(b_report.get("blocked_first") is True, "bootstrap actor B did not retry after a locked handover", errors)
+
+        pid_c = os.fork()
+        if pid_c == 0:
+            try:
+                os.close(c_ready_r)
+                try:
+                    with nddev_cline.bootstrap_lifecycle_lock(target) as canonical:
+                        write_pipe_json(c_ready_w, {"ok": False, "acquired": True, **lock_identity_payload(canonical)})
+                except nddev_cline.ClineSetupError as exc:
+                    write_pipe_json(c_ready_w, {"ok": True, "error": str(exc)})
+                os._exit(0)
+            except BaseException as exc:
+                with contextlib.suppress(OSError):
+                    write_pipe_json(c_ready_w, {"ok": False, "error": str(exc)})
+                os._exit(1)
+        os.close(c_ready_w)
+        c_report = read_pipe_json(c_ready_r, "bootstrap actor C", errors)
+        os.close(c_ready_r)
+        require(c_report.get("ok") is True and "locked" in str(c_report.get("error")), "bootstrap actor C did not observe B lock", errors)
+        os.write(b_release_w, b"1")
+        os.close(b_release_w)
+        wait_child_success(pid_b, "bootstrap actor B", errors)
+        wait_child_success(pid_c, "bootstrap actor C", errors)
+        final_identity = path_identity(lock_path)
+        require(initial_identity is not None, "bootstrap lock initial identity missing", errors)
+        if initial_identity is not None:
+            require(
+                tuple(a_report.get(key) for key in ("dev", "ino")) == initial_identity[:2],
+                "bootstrap actor A used a different lock inode",
+                errors,
+            )
+            require(
+                tuple(b_report.get(key) for key in ("dev", "ino")) == initial_identity[:2],
+                "bootstrap actor B used a different lock inode after handover",
+                errors,
+            )
+            require(final_identity is not None and final_identity[:2] == initial_identity[:2], "bootstrap lock inode was replaced", errors)
+
+
+def validate_bootstrap_lock_smokes(errors: list[str]) -> None:
+    with tempfile.TemporaryDirectory(prefix="nddev-cline-bootstrap-smoke-") as raw:
+        root = Path(raw)
+        root.chmod(0o700)
+        target = root / "target"
+        with nddev_cline.bootstrap_lifecycle_lock(target) as canonical_target:
+            lock_path = nddev_cline.bootstrap_lock_path(canonical_target)
+            product_root = lock_path.parent
+            require(product_root.parent == nddev_cline.fixed_system_temp_root(), "bootstrap lock escaped injected fixed root", errors)
+            locked_identity = path_identity(lock_path)
+        after_identity = path_identity(lock_path)
+        require(locked_identity is not None and after_identity == locked_identity, "bootstrap lock file did not persist after release", errors)
+        if lock_path.exists():
+            content = lock_path.read_bytes()
+            binding = json.loads(content.decode("utf-8"))
+            require(binding == nddev_cline.bootstrap_lock_binding(canonical_target), "bootstrap lock binding mismatch", errors)
+        nddev_cline.mutate_setup(target, "nddev-builder", "full-auto", "install")
+        before_remove_identity = path_identity(lock_path)
+        nddev_cline.remove_setup(target)
+        require(path_identity(lock_path) == before_remove_identity, "setup remove removed or replaced bootstrap lock", errors)
+
+        bad_target = root / "bad-target"
+        with nddev_cline.bootstrap_lifecycle_lock(bad_target) as bad_canonical:
+            bad_lock = nddev_cline.bootstrap_lock_path(bad_canonical)
+        wrong_binding = nddev_cline.bootstrap_lock_binding(root / "other-target")
+        bad_lock.write_bytes(nddev_cline.canonical_json(wrong_binding))
+        bad_lock.chmod(0o600)
+        observed_error = None
+        try:
+            with nddev_cline.bootstrap_lifecycle_lock(bad_target):
+                pass
+        except nddev_cline.ClineSetupError as exc:
+            observed_error = str(exc)
+        require(
+            isinstance(observed_error, str) and "different canonical target" in observed_error,
+            "bootstrap binding mismatch was not rejected",
+            errors,
+        )
+
+        symlink_target = root / "symlink-target"
+        symlink_canonical = nddev_cline.canonical_target_for_bootstrap_lock(symlink_target)
+        symlink_lock = nddev_cline.bootstrap_lock_path(symlink_canonical)
+        external = root / "external-lock"
+        external.write_text("sentinel\n", encoding="utf-8")
+        external.chmod(0o600)
+        if symlink_lock.exists() or symlink_lock.is_symlink():
+            symlink_lock.unlink()
+        os.symlink(external, symlink_lock)
+        observed_error = None
+        try:
+            with nddev_cline.bootstrap_lifecycle_lock(symlink_target):
+                pass
+        except nddev_cline.ClineSetupError as exc:
+            observed_error = str(exc)
+        require(
+            isinstance(observed_error, str) and "symlink" in observed_error,
+            "bootstrap symlink lock was not rejected",
+            errors,
+        )
 
 
 def install_validator_stub_cline(target: Path) -> None:
@@ -641,11 +997,18 @@ def validate_launch_profiles(errors: list[str]) -> None:
         del cwd, check, timeout
         executable = Path(argv[0])
         launch_target = executable.parent.parent
-        swap_error: str | None = None
+        concurrent_errors: dict[str, str | None] = {}
         lock_unlink_error: str | None = None
         replace_error: str | None = None
+        internal_lock_rename_error: str | None = None
+        internal_lock_restore_error: str | None = None
         lock_file = nddev_cline.lock_path(launch_target)
         lock_directory = nddev_cline.lock_directory_path(launch_target)
+        lock_file_mode = stat.S_IMODE(lock_file.lstat().st_mode) if lock_file.exists() else None
+        lock_directory_mode = stat.S_IMODE(lock_directory.lstat().st_mode) if lock_directory.exists() else None
+        target_mode_during_child = stat.S_IMODE(launch_target.lstat().st_mode)
+        bin_mode_during_child = stat.S_IMODE(executable.parent.lstat().st_mode)
+        executable_mode_during_child = stat.S_IMODE(executable.lstat().st_mode)
         runtime_write_errors: list[str] = []
         runtime_writes = [
             Path(env["HOME"]) / ".cline" / "session-state.json",
@@ -679,27 +1042,46 @@ def validate_launch_profiles(errors: list[str]) -> None:
             replace_error = exc.__class__.__name__
         finally:
             replacement.unlink(missing_ok=True)
+        renamed_lock_directory = launch_target / ".renamed-nddev-cline-lock"
         try:
-            nddev_cline.mutate_setup(launch_target, "nddev-builder", "safe", "switch")
-        except nddev_cline.ClineSetupError as exc:
-            swap_error = str(exc)
+            os.replace(lock_directory, renamed_lock_directory)
+        except OSError as exc:
+            internal_lock_rename_error = exc.__class__.__name__
+        for operation, callback in (
+            ("switch", lambda: nddev_cline.mutate_setup(launch_target, "nddev-builder", "safe", "switch")),
+            ("remove", lambda: nddev_cline.remove_setup(launch_target)),
+            ("install", lambda: nddev_cline.mutate_setup(launch_target, "nddev-builder", "full-auto", "install")),
+        ):
+            try:
+                callback()
+            except nddev_cline.ClineSetupError as exc:
+                concurrent_errors[operation] = str(exc)
+            else:
+                concurrent_errors[operation] = None
+        if renamed_lock_directory.exists() or renamed_lock_directory.is_symlink():
+            try:
+                os.replace(renamed_lock_directory, lock_directory)
+            except OSError as exc:
+                internal_lock_restore_error = exc.__class__.__name__
         captures.append(
             {
                 "argv": argv,
                 "env": env,
                 "lock_held": lock_file.is_file(),
-                "lock_file_mode": stat.S_IMODE(lock_file.lstat().st_mode) if lock_file.exists() else None,
-                "lock_directory_mode": stat.S_IMODE(lock_directory.lstat().st_mode) if lock_directory.exists() else None,
+                "lock_file_mode": lock_file_mode,
+                "lock_directory_mode": lock_directory_mode,
                 "lock_unlink_error": lock_unlink_error,
                 "lock_survived_unlink_attempt": lock_file.is_file(),
                 "replace_error": replace_error,
                 "executable_survived_replace_attempt": executable.is_file(),
+                "internal_lock_rename_error": internal_lock_rename_error,
+                "internal_lock_restore_error": internal_lock_restore_error,
+                "concurrent_errors": concurrent_errors,
                 "runtime_write_errors": runtime_write_errors,
                 "runtime_write_paths": [str(path) for path in runtime_writes],
-                "target_mode_during_child": stat.S_IMODE(launch_target.lstat().st_mode),
-                "bin_mode_during_child": stat.S_IMODE(executable.parent.lstat().st_mode),
-                "executable_mode_during_child": stat.S_IMODE(executable.lstat().st_mode),
-                "swap_error": swap_error,
+                "target_mode_during_child": target_mode_during_child,
+                "bin_mode_during_child": bin_mode_during_child,
+                "executable_mode_during_child": executable_mode_during_child,
             }
         )
         return subprocess.CompletedProcess(argv, 0, "", "")
@@ -735,11 +1117,18 @@ def validate_launch_profiles(errors: list[str]) -> None:
             require(full_auto.get("replace_error") is not None, "child executable replace attempt was not denied", errors)
             require(full_auto.get("executable_survived_replace_attempt") is True, "child replaced the executable", errors)
             require(full_auto.get("runtime_write_errors") == [], "full-auto runtime writes were blocked", errors)
-            require(
-                isinstance(full_auto.get("swap_error"), str) and "locked" in full_auto["swap_error"],
-                "manager swap at launch execution was not blocked by the lock",
-                errors,
-            )
+            require(full_auto.get("internal_lock_rename_error") is None, "child could not rename internal lock directory", errors)
+            require(full_auto.get("internal_lock_restore_error") is None, "child did not restore internal lock directory", errors)
+            concurrent = full_auto.get("concurrent_errors")
+            require(isinstance(concurrent, dict), "full-auto concurrent lifecycle results missing", errors)
+            if isinstance(concurrent, dict):
+                for operation in ("switch", "remove", "install"):
+                    message = concurrent.get(operation)
+                    require(
+                        isinstance(message, str) and "locked" in message,
+                        f"manager {operation} during renamed internal lock was not blocked by external lock",
+                        errors,
+                    )
             require("CLINE_DATA_DIR" not in env, "full-auto must not set CLINE_DATA_DIR", errors)
             require("CLINE_SANDBOX" not in env, "full-auto must not set CLINE_SANDBOX", errors)
             require(env.get("HOME") == str(canonical_target / "home"), "full-auto HOME mismatch", errors)
@@ -763,6 +1152,18 @@ def validate_launch_profiles(errors: list[str]) -> None:
             require(safe.get("lock_unlink_error") is not None, "safe child lock unlink attempt was not denied", errors)
             require(safe.get("replace_error") is not None, "safe child executable replace attempt was not denied", errors)
             require(safe.get("runtime_write_errors") == [], "safe runtime writes were blocked", errors)
+            require(safe.get("internal_lock_rename_error") is None, "safe child could not rename internal lock directory", errors)
+            require(safe.get("internal_lock_restore_error") is None, "safe child did not restore internal lock directory", errors)
+            concurrent = safe.get("concurrent_errors")
+            require(isinstance(concurrent, dict), "safe concurrent lifecycle results missing", errors)
+            if isinstance(concurrent, dict):
+                for operation in ("switch", "remove", "install"):
+                    message = concurrent.get(operation)
+                    require(
+                        isinstance(message, str) and "locked" in message,
+                        f"safe manager {operation} during renamed internal lock was not blocked by external lock",
+                        errors,
+                    )
             require(env.get("CLINE_SANDBOX") == "1", "safe must set CLINE_SANDBOX=1", errors)
             require("CLINE_DATA_DIR" not in env, "safe should let --data-dir drive data dir", errors)
             require(env.get("PATH") == nddev_cline.DETERMINISTIC_PATH, "safe PATH must be deterministic", errors)
@@ -1250,18 +1651,22 @@ def validate_release_workflow(errors: list[str]) -> None:
 
 def main() -> int:
     errors: list[str] = []
-    validate_versions(errors)
-    validate_setups_and_profiles(errors)
-    validate_install_lock_assets(errors)
-    validate_builder(errors)
-    validate_runtime_contract(errors)
-    validate_launch_profiles(errors)
-    validate_npm_stage_and_timeout(errors)
-    validate_security_smokes(errors)
-    validate_current_sources(errors)
-    validate_absence_of_placeholders(errors)
-    validate_shared_ci(errors)
-    validate_release_workflow(errors)
+    validate_bootstrap_lock_contract(errors)
+    with isolated_bootstrap_root(errors):
+        validate_versions(errors)
+        validate_setups_and_profiles(errors)
+        validate_install_lock_assets(errors)
+        validate_builder(errors)
+        validate_runtime_contract(errors)
+        validate_bootstrap_lock_smokes(errors)
+        validate_bootstrap_lock_handover(errors)
+        validate_launch_profiles(errors)
+        validate_npm_stage_and_timeout(errors)
+        validate_security_smokes(errors)
+        validate_current_sources(errors)
+        validate_absence_of_placeholders(errors)
+        validate_shared_ci(errors)
+        validate_release_workflow(errors)
     if errors:
         for error in errors:
             print(error)

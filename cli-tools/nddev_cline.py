@@ -38,6 +38,8 @@ BACKUP_POOL_NAME = "NDDEV-CLINE-BACKUPS.json"
 BACKUP_NAME = "NDDEV-CLINE-BACKUP.json"
 LOCK_DIRECTORY_NAME = ".nddev-cline-lock"
 LOCK_FILE_NAME = "lock"
+BOOTSTRAP_LOCK_POOL_NAME = ".nddev-cline-lifecycle-locks"
+BOOTSTRAP_LOCK_SUFFIX = ".lock"
 BASELINE_REF = ROOT / "references" / "cline-baseline.json"
 INSTALL_LOCK_ROOT = ROOT / "software" / "cline-cli"
 INSTALL_PACKAGE_JSON = INSTALL_LOCK_ROOT / "package.json"
@@ -83,6 +85,7 @@ PROCESS_TIMEOUT_SECONDS = 120
 VERSION_PROBE_TIMEOUT_SECONDS = 60
 SETUP_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 VERSION_PATTERN = re.compile(r"(?<![0-9])([0-9]+\.[0-9]+\.[0-9]+)(?![0-9])")
+BOOTSTRAP_LOCK_KEYS = {"schema_version", "product_name", "canonical_target", "target_key"}
 SOFTWARE_DIR_RELATIVE = Path("software") / "cline-cli"
 SOFTWARE_MANIFEST_RELATIVE = Path("software") / "cline-cli.json"
 SOFTWARE_REPLACE_PATHS = (
@@ -691,6 +694,71 @@ def lock_directory_path(target: Path) -> Path:
     return target / LOCK_DIRECTORY_NAME
 
 
+def bootstrap_lock_key(canonical_target: Path) -> str:
+    content = f"{PRODUCT_NAME}\0{canonical_target}".encode("utf-8")
+    return hashlib.sha256(content).hexdigest()
+
+
+def fixed_system_temp_root() -> Path:
+    root = Path("/private/tmp") if sys.platform.startswith("darwin") else Path("/tmp")
+    resolved = root.resolve()
+    info = require_directory(resolved, "bootstrap system temp root")
+    if not stat.S_IMODE(info.st_mode) & stat.S_ISVTX:
+        fail("bootstrap system temp root must be sticky")
+    return resolved
+
+
+def bootstrap_lock_pool(_canonical_target: Path) -> Path:
+    if hasattr(os, "geteuid"):
+        uid: int | str = os.geteuid()
+    elif hasattr(os, "getuid"):
+        uid = os.getuid()
+    else:
+        uid = "unknown"
+    return fixed_system_temp_root() / f".{PRODUCT_NAME}-{uid}-lifecycle-locks"
+
+
+def bootstrap_lock_path(canonical_target: Path) -> Path:
+    return bootstrap_lock_pool(canonical_target) / f"{bootstrap_lock_key(canonical_target)}{BOOTSTRAP_LOCK_SUFFIX}"
+
+
+def ensure_bootstrap_lock_pool(canonical_target: Path) -> Path:
+    pool = bootstrap_lock_pool(canonical_target)
+    try:
+        info = pool.lstat()
+    except FileNotFoundError:
+        try:
+            pool.mkdir(mode=OWNER_DIRECTORY_MODE)
+        except FileExistsError:
+            info = pool.lstat()
+        else:
+            pool.chmod(OWNER_DIRECTORY_MODE)
+            info = pool.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        fail("bootstrap lifecycle lock pool must be a real directory")
+    if not is_owner_private_directory(info):
+        fail("bootstrap lifecycle lock pool must be owned by the current user with mode 0700")
+    return pool
+
+
+def canonical_target_for_bootstrap_lock(target: Path) -> Path:
+    if not target.is_absolute():
+        fail("--target must be an absolute path")
+    if target.name in {"", ".", ".."}:
+        fail("--target must include a literal target directory name")
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        parent = target.parent
+        require_safe_target_parent_for_creation(parent)
+        return parent.resolve() / target.name
+    if stat.S_ISLNK(info.st_mode):
+        fail("--target must not be a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("--target must be a directory")
+    return target.resolve()
+
+
 def require_lock_file(path: Path, label: str) -> os.stat_result:
     try:
         info = path.lstat()
@@ -705,8 +773,7 @@ def require_lock_file(path: Path, label: str) -> os.stat_result:
     return info
 
 
-def open_lock_file(target: Path, *, create: bool) -> int:
-    path = lock_path(target)
+def open_persistent_lock_file(path: Path, label: str, *, create: bool) -> int:
     flags = os.O_RDWR
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
@@ -719,26 +786,54 @@ def open_lock_file(target: Path, *, create: bool) -> int:
             raise
         try:
             descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+        except FileExistsError:
+            descriptor = os.open(path, flags)
         except OSError as exc:
-            fail(f"cannot create target lock file {path}: {exc}")
+            fail(f"cannot create {label} {path}: {exc}")
         os.fchmod(descriptor, OWNER_FILE_MODE)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            fail("target lock file must not be a symlink")
-        fail(f"cannot open target lock file {path}: {exc}")
+            fail(f"{label} must not be a symlink")
+        fail(f"cannot open {label} {path}: {exc}")
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-            fail("target lock file must be a regular file")
+            fail(f"{label} must be a regular file")
         if not is_owner_only_file(opened):
-            fail("target lock file must be owned by the current user with mode 0600")
-        current = require_lock_file(path, "target lock file")
+            fail(f"{label} must be owned by the current user with mode 0600")
+        current = require_lock_file(path, label)
         if identity_of(current) != identity_of(opened):
-            fail_concurrent("target lock file changed while it was being opened")
+            fail_concurrent(f"{label} changed while it was being opened")
     except BaseException:
         os.close(descriptor)
         raise
     return descriptor
+
+
+def read_lock_file_descriptor(descriptor: int, *, label: str) -> bytes:
+    try:
+        size = os.lseek(descriptor, 0, os.SEEK_END)
+        if size > METADATA_MAX_BYTES:
+            fail(f"{label} exceeds the metadata size limit")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return os.read(descriptor, size)
+    except OSError as exc:
+        fail(f"cannot read {label}: {exc}")
+
+
+def write_lock_file_descriptor(descriptor: int, content: bytes, *, label: str) -> None:
+    try:
+        os.ftruncate(descriptor, 0)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.write(descriptor, content)
+        os.fchmod(descriptor, OWNER_FILE_MODE)
+    except OSError as exc:
+        fail(f"cannot write {label}: {exc}")
+
+
+def open_lock_file(target: Path, *, create: bool) -> int:
+    path = lock_path(target)
+    return open_persistent_lock_file(path, "target lock file", create=create)
 
 
 def acquire_file_lock(descriptor: int, path: Path) -> None:
@@ -824,12 +919,117 @@ def target_lock(target: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
-def require_explicit_absolute_target(raw_target: str | None) -> Path:
+def bootstrap_lock_binding(canonical_target: Path) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "product_name": PRODUCT_NAME,
+        "canonical_target": str(canonical_target),
+        "target_key": bootstrap_lock_key(canonical_target),
+    }
+
+
+def validate_bootstrap_lock_binding(
+    descriptor: int,
+    path: Path,
+    canonical_target: Path,
+) -> None:
+    opened = os.fstat(descriptor)
+    current = require_lock_file(path, "bootstrap lifecycle lock file")
+    if identity_of(current) != identity_of(opened):
+        fail_concurrent("bootstrap lifecycle lock file changed while locked")
+    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+        fail("bootstrap lifecycle lock file must be a regular file")
+    if not is_owner_only_file(opened):
+        fail("bootstrap lifecycle lock file must be owned by the current user with mode 0600")
+    desired = bootstrap_lock_binding(canonical_target)
+    content = read_lock_file_descriptor(descriptor, label="bootstrap lifecycle lock file")
+    if not content:
+        write_lock_file_descriptor(
+            descriptor,
+            canonical_json(desired),
+            label="bootstrap lifecycle lock file",
+        )
+        verify_locked_file_identity(descriptor, path, "bootstrap lifecycle lock file")
+        return
+    binding = parse_json_object(content, "bootstrap lifecycle lock file")
+    require_exact_keys(binding, BOOTSTRAP_LOCK_KEYS, "bootstrap lifecycle lock file")
+    if (
+        binding["schema_version"] != 1
+        or binding["product_name"] != PRODUCT_NAME
+        or binding["canonical_target"] != str(canonical_target)
+        or binding["target_key"] != bootstrap_lock_key(canonical_target)
+    ):
+        fail("bootstrap lifecycle lock file is bound to a different canonical target")
+    verify_locked_file_identity(descriptor, path, "bootstrap lifecycle lock file")
+
+
+def verify_locked_file_identity(descriptor: int, path: Path, label: str) -> None:
+    opened = os.fstat(descriptor)
+    current = require_lock_file(path, label)
+    if identity_of(current) != identity_of(opened):
+        fail_concurrent(f"{label} changed while locked")
+    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+        fail(f"{label} must be a regular file")
+    if not is_owner_only_file(opened):
+        fail(f"{label} must be owned by the current user with mode 0600")
+
+
+@contextlib.contextmanager
+def bootstrap_lifecycle_lock(target: Path) -> Iterator[Path]:
+    canonical_target = canonical_target_for_bootstrap_lock(target)
+    pool = ensure_bootstrap_lock_pool(canonical_target)
+    path = pool / f"{bootstrap_lock_key(canonical_target)}{BOOTSTRAP_LOCK_SUFFIX}"
+    descriptor = open_persistent_lock_file(
+        path,
+        "bootstrap lifecycle lock file",
+        create=True,
+    )
+    acquired = False
+    try:
+        acquire_file_lock(descriptor, path)
+        acquired = True
+        validate_bootstrap_lock_binding(descriptor, path, canonical_target)
+        yield canonical_target
+    finally:
+        if acquired:
+            release_file_lock(descriptor)
+        os.close(descriptor)
+
+
+@contextlib.contextmanager
+def locked_new_or_existing_target(target: Path) -> Iterator[Path]:
+    with bootstrap_lifecycle_lock(target) as locked_target:
+        canonical_target = ensure_target_directory(locked_target)
+        if canonical_target != locked_target:
+            fail_concurrent("target canonical path changed during lifecycle lock acquisition")
+        with target_lock(canonical_target):
+            yield canonical_target
+
+
+@contextlib.contextmanager
+def locked_existing_target(target: Path) -> Iterator[Path]:
+    with bootstrap_lifecycle_lock(target) as canonical_target:
+        with target_lock(canonical_target):
+            yield canonical_target
+
+
+@contextlib.contextmanager
+def locked_inspection_target(target: Path) -> Iterator[Path]:
+    with bootstrap_lifecycle_lock(target) as canonical_target:
+        yield canonical_target
+
+
+def require_absolute_target_argument(raw_target: str | None) -> Path:
     if not raw_target:
         fail("an explicit --target absolute path is required")
     target = Path(raw_target)
     if not target.is_absolute():
         fail("--target must be an absolute path")
+    return target
+
+
+def require_explicit_absolute_target(raw_target: str | None) -> Path:
+    target = require_absolute_target_argument(raw_target)
     try:
         info = target.lstat()
     except FileNotFoundError:
@@ -1307,8 +1507,7 @@ def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[Path, byt
 
 
 def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -> dict[str, Any]:
-    canonical_target = ensure_target_directory(target)
-    with target_lock(canonical_target):
+    with locked_new_or_existing_target(target) as canonical_target:
         state = inspect_target(canonical_target)
         if state["state"] == "legacy-managed":
             fail("legacy managed targets must be migrated, restored, or removed before launch")
@@ -1348,57 +1547,49 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
 
 
 def plan_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
-    try:
-        info = target.lstat()
-    except FileNotFoundError:
-        canonical_target = target
-    else:
-        if stat.S_ISLNK(info.st_mode):
-            fail("target must not be a symlink")
-        canonical_target = target.resolve()
-    state = inspect_target(canonical_target)
-    existing_settings = read_existing_settings_if_managed(canonical_target, state)
-    _metadata, desired = render_setup(
-        setup_id,
-        profile_id,
-        existing_settings=existing_settings,
-    )
-    if state["state"] == "managed":
-        stamp = bind_stamp(
-            parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target
+    with locked_inspection_target(target) as canonical_target:
+        state = inspect_target(canonical_target)
+        existing_settings = read_existing_settings_if_managed(canonical_target, state)
+        _metadata, desired = render_setup(
+            setup_id,
+            profile_id,
+            existing_settings=existing_settings,
         )
-        desired[Path(STAMP_NAME)] = canonical_json(stamp)
-        changed = changed_paths(canonical_target, desired)
-        operation = (
-            "switch"
-            if state.get("setup_id") != setup_id or state.get("profile_id") != profile_id
-            else "install"
-        )
-        backup_required = bool(changed)
-    elif state["state"] == "legacy-managed":
-        changed = sorted(str(path) for path in desired)
-        operation = "migrate"
-        backup_required = True
-    else:
-        changed = sorted(str(path) for path in desired)
-        operation = "install"
-        backup_required = False
-    return {
-        "ok": True,
-        "operation": operation,
-        "setup_id": setup_id,
-        "profile_id": profile_id,
-        "target": str(canonical_target),
-        "state": state["state"],
-        "mutates": False,
-        "backup_required": backup_required,
-        "changed": changed,
-    }
+        if state["state"] == "managed":
+            stamp = bind_stamp(
+                parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target
+            )
+            desired[Path(STAMP_NAME)] = canonical_json(stamp)
+            changed = changed_paths(canonical_target, desired)
+            operation = (
+                "switch"
+                if state.get("setup_id") != setup_id or state.get("profile_id") != profile_id
+                else "install"
+            )
+            backup_required = bool(changed)
+        elif state["state"] == "legacy-managed":
+            changed = sorted(str(path) for path in desired)
+            operation = "migrate"
+            backup_required = True
+        else:
+            changed = sorted(str(path) for path in desired)
+            operation = "install"
+            backup_required = False
+        return {
+            "ok": True,
+            "operation": operation,
+            "setup_id": setup_id,
+            "profile_id": profile_id,
+            "target": str(canonical_target),
+            "state": state["state"],
+            "mutates": False,
+            "backup_required": backup_required,
+            "changed": changed,
+        }
 
 
 def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
-    canonical_target = require_explicit_absolute_target(str(target))
-    with target_lock(canonical_target):
+    with locked_existing_target(target) as canonical_target:
         state = inspect_target(canonical_target)
         if state["state"] != "legacy-managed":
             fail("target does not contain legacy nddev-cline-app managed state")
@@ -1434,8 +1625,7 @@ def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any
 
 
 def remove_setup(target: Path) -> dict[str, Any]:
-    canonical_target = require_explicit_absolute_target(str(target))
-    with target_lock(canonical_target):
+    with locked_existing_target(target) as canonical_target:
         state = inspect_target(canonical_target)
         if state["state"] not in {"managed", "legacy-managed"}:
             fail("target is not managed by nddev-cline-app")
@@ -1458,8 +1648,7 @@ def remove_setup(target: Path) -> dict[str, Any]:
 
 
 def restore_backup(target: Path, slot: int) -> dict[str, Any]:
-    canonical_target = require_explicit_absolute_target(str(target))
-    with target_lock(canonical_target):
+    with locked_existing_target(target) as canonical_target:
         state = inspect_target(canonical_target)
         if state["state"] not in {"managed", "legacy-managed"}:
             fail("target is not managed by nddev-cline-app")
@@ -2085,6 +2274,16 @@ def software_status(target: Path, *, recover_protected: bool = True) -> dict[str
     return result
 
 
+def inspect_target_with_locks(target: Path) -> dict[str, Any]:
+    with locked_inspection_target(target) as canonical_target:
+        return inspect_target(canonical_target)
+
+
+def software_status_with_locks(target: Path) -> dict[str, Any]:
+    with locked_inspection_target(target) as canonical_target:
+        return software_status(canonical_target)
+
+
 def write_npm_config(stage_root: Path, cache: Path) -> tuple[Path, Path]:
     userconfig = stage_root / "npmrc"
     globalconfig = stage_root / "global-npmrc"
@@ -2435,67 +2634,76 @@ def write_stage_manifest(live_stage: Path) -> None:
 
 def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
     require_supported_runtime_platform()
-    if operation == "update-cli":
-        try:
-            info = target.lstat()
-        except FileNotFoundError:
-            fail("Cline CLI is not installed; use install-cli")
-        if stat.S_ISLNK(info.st_mode):
-            fail("target must not be a symlink")
-        if not stat.S_ISDIR(info.st_mode):
-            fail("target must be a directory")
-        if not is_owner_private_directory(info):
-            fail("target must be owned by the current user with mode 0700")
-        canonical_target = target.resolve()
-    else:
-        canonical_target = ensure_target_directory(target)
-    with target_lock(canonical_target):
-        status = software_status(canonical_target)
-        if status["installed"] and status["current"]:
-            return {
-                "ok": True,
-                "operation": operation,
-                "target": str(canonical_target),
-                "version": TESTED_CLI_VERSION,
-                "package": NPM_PACKAGE,
-                "package_manager": "npm",
-                "install_method": "npm-ci-lockfile",
-                "executable": str(cline_executable(canonical_target)),
-                "changed": False,
-            }
-        if operation == "install-cli":
-            if status.get("partial"):
-                fail(
-                    "partial target-owned Cline CLI software state exists; "
-                    "use update-cli or repair/remove the target-owned software paths"
-                )
-            if status["installed"]:
-                fail("Cline CLI is already installed but not current; use update-cli")
-            if status.get("owned_parent_paths_present") or status.get("replace_paths_present"):
-                fail(
-                    "target-owned Cline CLI software paths already exist; "
-                    "use update-cli or repair/remove them"
-                )
-        if operation == "update-cli" and status["software_state"] == "absent":
-            fail("Cline CLI is not installed; use install-cli")
+    with bootstrap_lifecycle_lock(target) as locked_target:
         if operation == "update-cli":
-            validate_existing_software_surface(canonical_target)
-        staging = Path(
-            tempfile.mkdtemp(
-                dir=canonical_target.parent,
-                prefix=f".{canonical_target.name}.nddev-cline-cli-stage.",
+            try:
+                info = locked_target.lstat()
+            except FileNotFoundError:
+                fail("Cline CLI is not installed; use install-cli")
+            if stat.S_ISLNK(info.st_mode):
+                fail("target must not be a symlink")
+            if not stat.S_ISDIR(info.st_mode):
+                fail("target must be a directory")
+            if not is_owner_private_directory(info):
+                fail("target must be owned by the current user with mode 0700")
+            canonical_target = locked_target
+        else:
+            canonical_target = ensure_target_directory(locked_target)
+            if canonical_target != locked_target:
+                fail_concurrent("target canonical path changed during lifecycle lock acquisition")
+        with target_lock(canonical_target):
+            result = install_or_update_cli_locked(canonical_target, operation=operation)
+    return result
+
+
+def install_or_update_cli_locked(target: Path, *, operation: str) -> dict[str, Any]:
+    canonical_target = target
+    status = software_status(canonical_target)
+    if status["installed"] and status["current"]:
+        return {
+            "ok": True,
+            "operation": operation,
+            "target": str(canonical_target),
+            "version": TESTED_CLI_VERSION,
+            "package": NPM_PACKAGE,
+            "package_manager": "npm",
+            "install_method": "npm-ci-lockfile",
+            "executable": str(cline_executable(canonical_target)),
+            "changed": False,
+        }
+    if operation == "install-cli":
+        if status.get("partial"):
+            fail(
+                "partial target-owned Cline CLI software state exists; "
+                "use update-cli or repair/remove the target-owned software paths"
             )
+        if status["installed"]:
+            fail("Cline CLI is already installed but not current; use update-cli")
+        if status.get("owned_parent_paths_present") or status.get("replace_paths_present"):
+            fail(
+                "target-owned Cline CLI software paths already exist; "
+                "use update-cli or repair/remove them"
+            )
+    if operation == "update-cli" and status["software_state"] == "absent":
+        fail("Cline CLI is not installed; use install-cli")
+    if operation == "update-cli":
+        validate_existing_software_surface(canonical_target)
+    staging = Path(
+        tempfile.mkdtemp(
+            dir=canonical_target.parent,
+            prefix=f".{canonical_target.name}.nddev-cline-cli-stage.",
         )
-        staging.chmod(OWNER_DIRECTORY_MODE)
-        try:
-            live_stage = staging / "live"
-            live_stage.mkdir(mode=OWNER_DIRECTORY_MODE)
-            node = run_npm_install(staging, live_stage)
-            chmod_private_tree(live_stage)
-            write_stage_manifest(live_stage)
-            replace_software_state(canonical_target, live_stage, staging)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+    )
+    staging.chmod(OWNER_DIRECTORY_MODE)
+    try:
+        live_stage = staging / "live"
+        live_stage.mkdir(mode=OWNER_DIRECTORY_MODE)
+        node = run_npm_install(staging, live_stage)
+        chmod_private_tree(live_stage)
+        write_stage_manifest(live_stage)
+        replace_software_state(canonical_target, live_stage, staging)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return {
         "ok": True,
         "operation": operation,
@@ -2576,8 +2784,7 @@ def validate_launch_args(args: list[str]) -> None:
 def launch_cline(target: Path, args: list[str]) -> int:
     require_supported_runtime_platform()
     validate_launch_args(args)
-    canonical_target = require_explicit_absolute_target(str(target))
-    with target_lock(canonical_target):
+    with locked_existing_target(target) as canonical_target:
         state = inspect_target(canonical_target)
         if state["state"] != "managed":
             fail("target is not managed by nddev-cline-app")
@@ -2694,46 +2901,46 @@ def run(args: argparse.Namespace) -> int:
         )
         return 0
     if args.command == "status":
-        target = require_explicit_absolute_target(args.target)
-        print_payload({"ok": True, **inspect_target(target)}, json_output=args.json)
+        target = require_absolute_target_argument(args.target)
+        print_payload({"ok": True, **inspect_target_with_locks(target)}, json_output=args.json)
         return 0
     if args.command == "software-status":
-        target = require_explicit_absolute_target(args.target)
-        print_payload(software_status(target), json_output=args.json)
+        target = require_absolute_target_argument(args.target)
+        print_payload(software_status_with_locks(target), json_output=args.json)
         return 0
     if args.command == "plan":
-        target = require_explicit_absolute_target(args.target)
+        target = require_absolute_target_argument(args.target)
         print_payload(plan_setup(target, args.setup, args.profile), json_output=args.json)
         return 0
     if args.command in {"install", "switch"}:
-        target = require_explicit_absolute_target(args.target)
+        target = require_absolute_target_argument(args.target)
         print_payload(
             mutate_setup(target, args.setup, args.profile, args.command),
             json_output=args.json,
         )
         return 0
     if args.command == "migrate":
-        target = require_explicit_absolute_target(args.target)
+        target = require_absolute_target_argument(args.target)
         print_payload(migrate_setup(target, args.setup, args.profile), json_output=args.json)
         return 0
     if args.command == "restore":
-        target = require_explicit_absolute_target(args.target)
+        target = require_absolute_target_argument(args.target)
         print_payload(restore_backup(target, args.backup), json_output=args.json)
         return 0
     if args.command == "remove":
-        target = require_explicit_absolute_target(args.target)
+        target = require_absolute_target_argument(args.target)
         print_payload(remove_setup(target), json_output=args.json)
         return 0
     if args.command == "install-cli":
-        target = require_explicit_absolute_target(args.target)
+        target = require_absolute_target_argument(args.target)
         print_payload(install_or_update_cli(target, operation="install-cli"), json_output=args.json)
         return 0
     if args.command == "update-cli":
-        target = require_explicit_absolute_target(args.target)
+        target = require_absolute_target_argument(args.target)
         print_payload(install_or_update_cli(target, operation="update-cli"), json_output=args.json)
         return 0
     if args.command == "launch":
-        target = require_explicit_absolute_target(args.target)
+        target = require_absolute_target_argument(args.target)
         cline_args = list(args.cline_args)
         if cline_args and cline_args[0] == "--":
             cline_args = cline_args[1:]
