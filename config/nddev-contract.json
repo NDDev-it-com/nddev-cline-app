@@ -5,10 +5,26 @@
   "license": "AGPL-3.0-or-later",
   "setup_system": {
     "manager": "cli-tools/nddev_cline.py",
-    "setup_ids": ["safe", "balanced", "full-auto"],
+    "setup_ids": ["nddev-builder"],
+    "profile_ids": ["full-auto", "safe"],
+    "default_setup": "nddev-builder",
+    "default_profile": "full-auto",
     "explicit_absolute_target_required": true,
     "builder_default_on": true,
-    "lifecycle": ["list", "status", "plan", "install", "switch", "restore", "remove", "software-status", "install-cli", "update-cli", "launch"]
+    "lifecycle": [
+      "list",
+      "status",
+      "plan",
+      "install",
+      "switch",
+      "migrate",
+      "restore",
+      "remove",
+      "software-status",
+      "install-cli",
+      "update-cli",
+      "launch"
+    ]
   },
   "runtime_compatibility": {
     "baseline_ref": "references/cline-baseline.json",
@@ -18,38 +34,46 @@
     "cli_command": "cline",
     "extension_tested_version": "4.0.11",
     "vscode_extension_id": "saoudrizwan.claude-dev",
+    "supported_platforms": ["macos-arm64", "macos-x64", "ubuntu-linux-arm64", "ubuntu-linux-x64"],
+    "unsupported_platforms": ["windows"],
     "documentation": [
       "https://docs.cline.bot/getting-started/installing-cline",
-      "https://docs.cline.bot/getting-started/config",
       "https://docs.cline.bot/cli/cli-reference",
       "https://docs.cline.bot/customization/skills",
       "https://docs.cline.bot/customization/plugins",
+      "https://docs.cline.bot/sdk/guides/writing-plugins",
       "https://docs.cline.bot/mcp/mcp-overview",
+      "https://raw.githubusercontent.com/cline/cline/main/apps/cli/README.md",
+      "https://raw.githubusercontent.com/cline/cline/main/sdk/packages/shared/src/storage/paths.ts",
+      "https://raw.githubusercontent.com/cline/cline/main/apps/cli/src/commands/config.ts",
       "https://github.com/cline/cline/releases/tag/v4.0.11",
       "https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev"
     ]
   },
   "builder_capability": {
-    "projection": "cline-native-skills-agents-plugin-user-files",
+    "projection": "cline-native-skills-yaml-agent-plugin-rules-user-files",
     "source_root": "plugins/nddev-builder",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "native_paths": [
-      "skills/nddev-builder/SKILL.md",
-      "data/settings/skills/nddev-builder/SKILL.md",
-      "agents/nddev-builder.md",
-      "plugins/nddev-builder/package.json",
-      "plugins/nddev-builder/index.js"
+      "home/.cline/skills/nddev-builder/SKILL.md",
+      "home/.cline/skills/nddev-builder/references",
+      "home/.cline/agents/nddev-builder.yaml",
+      "home/.cline/plugins/nddev-builder/package.json",
+      "home/.cline/plugins/nddev-builder/index.js",
+      "home/.cline/rules/nddev-managed.md",
+      "home/.cline/data/settings/cline_mcp_settings.json"
     ],
     "default_on": true,
+    "plugin_distribution": "native cline.plugins package in home/.cline/plugins",
     "marketplace": null,
-    "marketplace_reason": "Cline documents plugin install sources and plugin directories, but no separate marketplace contract is required for this local target projection."
+    "marketplace_reason": "Cline plugin loading is documented through native plugin directories and package cline.plugins metadata; this module does not emulate or ship a marketplace."
   },
   "runtime_launch": {
     "command": "<absolute-target>/bin/cline",
-    "direct_command": "CLINE_DATA_DIR=<absolute-target>/data CLINE_COMMAND_PERMISSIONS=<setup-policy> <absolute-target>/bin/cline --data-dir <absolute-target> --config <absolute-target>/data/settings --hooks-dir <absolute-target>/hooks [setup launch args] [args...]",
-    "data_environment_variable": "CLINE_DATA_DIR",
+    "full_auto_command": "HOME=<absolute-target>/home CLINE_COMMAND_PERMISSIONS=<allow-all-policy> <absolute-target>/bin/cline --auto-approve true --config <absolute-target>/home/.cline/data/settings --hooks-dir <absolute-target>/home/.cline/hooks [args...]",
+    "safe_command": "HOME=<absolute-target>/home CLINE_SANDBOX=1 CLINE_COMMAND_PERMISSIONS=<deny-all-policy> <absolute-target>/bin/cline --plan --auto-approve false --config <absolute-target>/home/.cline/data/settings --hooks-dir <absolute-target>/home/.cline/hooks --data-dir <absolute-target>/sandbox [args...]",
     "permissions_environment_variable": "CLINE_COMMAND_PERMISSIONS",
-    "executable_source": "validated-target-owned-bun-global-install",
+    "executable_source": "validated-target-owned-npm-global-prefix-install",
     "extension_launch_supported": false,
     "extension_install_supported": false,
     "extension_install_reason": "VS Code extension installation and launch require editor-managed state and are deliberately out of scope for this target-only manager.",
@@ -58,17 +82,53 @@
     "json_manager_errors_supported": true,
     "manager_command": "python3 cli-tools/nddev_cline.py launch --target <absolute-target> -- [args...]",
     "requires_clean_managed_target": true,
-    "blocks_user_managed_flags": ["--auto-approve", "--config", "--data-dir", "--hooks-dir", "--key", "-k"],
+    "blocks_user_managed_flags": [
+      "--auto-approve",
+      "--config",
+      "--data-dir",
+      "--hooks-dir",
+      "--key",
+      "--plan",
+      "--provider",
+      "--yolo",
+      "--zen",
+      "-k"
+    ],
     "preflight_lock": "held until child argv and environment are prepared",
     "lock_released_before_child": true,
     "streams_child_stdio": true,
     "successful_child_output_wrapped": false,
     "environment_scope": "child-process-only",
-    "token_environment_inheritance": "stripped"
+    "token_environment_inheritance": "stripped",
+    "legacy_launch_policy": "legacy 0.1.0 managed targets may be inspected, migrated, restored, or removed, but never launched"
   },
   "command_policy": {
-    "json_supported": ["list", "status", "plan", "install", "switch", "restore", "remove", "software-status", "install-cli", "update-cli"],
-    "target_required": ["status", "plan", "install", "switch", "restore", "remove", "software-status", "install-cli", "update-cli", "launch"],
+    "json_supported": [
+      "list",
+      "status",
+      "plan",
+      "install",
+      "switch",
+      "migrate",
+      "restore",
+      "remove",
+      "software-status",
+      "install-cli",
+      "update-cli"
+    ],
+    "target_required": [
+      "status",
+      "plan",
+      "install",
+      "switch",
+      "migrate",
+      "restore",
+      "remove",
+      "software-status",
+      "install-cli",
+      "update-cli",
+      "launch"
+    ],
     "plan_mutates": false,
     "restore_backup_option": "--backup <0..9>"
   },
@@ -96,37 +156,61 @@
     "cli": {
       "supported": true,
       "tested_version": "3.0.46",
-      "source": "npm package cline installed by Bun global exact package manager contract",
+      "source": "official npm package cline installed into a target-owned global prefix",
       "package": "cline",
       "package_spec": "cline@3.0.46",
-      "package_manager": "bun",
-      "install_argv": ["bun", "add", "--global", "--exact", "--trust", "cline@3.0.46"],
-      "trusted_lifecycle_scripts": {
-        "enabled": true,
+      "package_manager": "npm",
+      "registry": "https://registry.npmjs.org/",
+      "node_preflight": {
+        "minimum_major": 20,
+        "recommended_major": 22
+      },
+      "install_argv": [
+        "npm",
+        "install",
+        "--global",
+        "--prefix",
+        "<stage-global>",
+        "--cache",
+        "<stage-cache>",
+        "--userconfig",
+        "<stage-npmrc>",
+        "--globalconfig",
+        "<stage-global-npmrc>",
+        "--registry",
+        "https://registry.npmjs.org/",
+        "--fund=false",
+        "--audit=false",
+        "--ignore-scripts=false",
+        "cline@3.0.46"
+      ],
+      "registry_metadata_preflight": {
         "package": "cline",
         "version": "3.0.46",
-        "reason": "Official cline@3.0.46 registry metadata declares a postinstall script and platform optionalDependencies; Bun requires explicit trust for lifecycle scripts."
+        "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.46.tgz",
+        "integrity": "sha512-U6uH3sLVvqx4fP65ejHkswhk3WvYOM2LCbQBX77Z7Tha4EX35vo2XZ51F6WnIiKlCAYZJ+YAEou2Yha/EAk+2A==",
+        "shasum": "5b731496d251f76448fe676edbf4fde415b58881"
       },
       "environment_policy": {
         "inheritance": "minimal-allowlist",
         "target_owned": true,
         "required": [
-          "BUN_INSTALL_GLOBAL_DIR",
-          "BUN_INSTALL_BIN",
-          "BUN_INSTALL_CACHE_DIR",
           "HOME",
           "USERPROFILE",
           "TMPDIR",
           "XDG_CONFIG_HOME",
           "XDG_CACHE_HOME",
-          "XDG_STATE_HOME"
+          "XDG_STATE_HOME",
+          "NPM_CONFIG_USERCONFIG",
+          "NPM_CONFIG_GLOBALCONFIG",
+          "NPM_CONFIG_PREFIX",
+          "NPM_CONFIG_CACHE",
+          "NPM_CONFIG_REGISTRY"
         ],
         "forbidden": [
           "NODE_AUTH_TOKEN",
           "NPM_TOKEN",
-          "BUN_AUTH_TOKEN",
           "npm_config_userconfig",
-          "BUN_CONFIG_*",
           "*_API_KEY",
           "*_TOKEN",
           "*_SECRET"
@@ -148,12 +232,12 @@
       },
       "bounds": {
         "max_tree_paths": 50000,
-        "max_tree_bytes": 536870912,
-        "rationale": "Machine-owned measured baseline and headroom rationale live in build/manifest.json software_lifecycle.bounds."
+        "max_tree_bytes": 536870912
       },
       "layout": {
         "visible_command": "bin/cline",
         "global_dir": "software/cline-cli/install/global",
+        "package_wrapper": "software/cline-cli/install/global/lib/node_modules/cline/bin/cline",
         "tree_digest_fields": ["tree_digest", "entrypoint_sha256"],
         "software_manifest": "software/cline-cli.json"
       }

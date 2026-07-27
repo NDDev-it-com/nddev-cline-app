@@ -19,5 +19,6 @@ Managed target paths:
 - `home/.cline/plugins/nddev-builder/package.json`
 - `home/.cline/plugins/nddev-builder/index.js`
 
-The manager owns those paths only inside the explicit target. Legacy 0.1.0
-managed paths are readable only for status, migrate, restore, and remove.
+The manager owns those paths only inside the explicit target. Legacy managed
+version identities live in `cli-tools/nddev_cline.py`; legacy paths are readable
+only for status, migrate, restore, and remove.

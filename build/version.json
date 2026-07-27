@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "build_version": "0.1.0",
+  "build_version": "0.2.0",
   "cline_extension_tested": "4.0.11",
   "cline_extension_release_tag": "v4.0.11",
   "cline_extension_published_at": "2026-07-24T19:03:48Z",
@@ -10,18 +10,22 @@
   "cline_cli_package": "cline",
   "cline_cli_integrity": "sha512-U6uH3sLVvqx4fP65ejHkswhk3WvYOM2LCbQBX77Z7Tha4EX35vo2XZ51F6WnIiKlCAYZJ+YAEou2Yha/EAk+2A==",
   "cline_cli_shasum": "5b731496d251f76448fe676edbf4fde415b58881",
-  "cline_cli_install_method": "bun add --global --exact --trust cline@3.0.46",
-  "bun_global_install_env": [
-    "BUN_INSTALL_GLOBAL_DIR",
-    "BUN_INSTALL_BIN",
-    "BUN_INSTALL_CACHE_DIR",
+  "cline_cli_install_method": "target-owned npm global prefix",
+  "node_minimum_major": 20,
+  "node_recommended_major": 22,
+  "npm_global_prefix_install_env": [
     "HOME",
     "USERPROFILE",
     "TMPDIR",
     "XDG_CONFIG_HOME",
     "XDG_CACHE_HOME",
-    "XDG_STATE_HOME"
+    "XDG_STATE_HOME",
+    "NPM_CONFIG_USERCONFIG",
+    "NPM_CONFIG_GLOBALCONFIG",
+    "NPM_CONFIG_PREFIX",
+    "NPM_CONFIG_CACHE",
+    "NPM_CONFIG_REGISTRY"
   ],
-  "nddev_builder_extension_version": "0.1.0",
+  "nddev_builder_extension_version": "0.2.0",
   "runtime_baseline_ref": "references/cline-baseline.json"
 }

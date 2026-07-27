@@ -1,39 +1,56 @@
 # nddev-cline-app
 
-NDDev setup-switching manager for current Cline.
+NDDev setup manager for the Cline CLI.
 
-This module manages Cline through an explicit, isolated target directory. It
+This module manages Cline through an explicit isolated target directory. It
 does not read or modify live VS Code extension state, Cline authentication,
-provider credentials, user caches, or global Cline state.
+provider credentials, npm credentials, user caches, or global Cline state.
 
-## Verified upstream surface
+## Verified Upstream Surface
 
-- VS Code extension: `saoudrizwan.claude-dev`
-- Extension tested version: `4.0.11`
 - CLI command: `cline`
 - CLI npm package: `cline`
 - CLI tested version: `3.0.46`
-- Official source/release: <https://github.com/cline/cline/releases/tag/v4.0.11>
+- Official CLI install channel: `npm install -g cline`
+- Node.js preflight: 20+ required, 22 recommended
+- VS Code extension metadata only: `saoudrizwan.claude-dev` `4.0.11`
 - Official documentation:
-  <https://docs.cline.bot/getting-started/installing-cline>,
-  <https://docs.cline.bot/getting-started/config>, and
+  <https://docs.cline.bot/getting-started/installing-cline> and
   <https://docs.cline.bot/cli/cli-reference>
 
-Cline is editor-first, but current official docs also define a CLI. This module
-therefore supports target-owned CLI installation and launch only. Extension
-installation and extension launch remain unsupported because those operations
-would require editor-managed live state.
+Extension installation and extension launch are unsupported because those
+operations require editor-managed live state.
 
-## Setup variants
+## Setup And Profiles
 
-- `safe`: plan mode, auto-approval disabled, shell commands denied.
-- `balanced`: auto-approval disabled, common local validation commands allowed,
-  destructive/auth/publish commands denied.
-- `full-auto`: auto-approval enabled in the isolated target while destructive,
-  auth, publish, and self-update commands stay denied.
+The content setup and permission profile are orthogonal.
 
-All variants enable `nddev-builder` by default through Cline native skills,
-agents, plugins, rules, and settings. No separate marketplace is assumed.
+- Setup: `nddev-builder`
+- Default profile: `full-auto`
+- Safe profile: `safe`
+
+`full-auto` runs without Cline native sandboxing:
+
+- `HOME=<target>/home`
+- `--config <target>/home/.cline/data/settings`
+- `--hooks-dir <target>/home/.cline/hooks`
+- `--auto-approve true`
+- `CLINE_COMMAND_PERMISSIONS` allows `["*"]`, denies `[]`, and allows redirects
+- no `--data-dir`
+- no `CLINE_DATA_DIR`
+- no `CLINE_SANDBOX`
+- no `--yolo`
+
+`safe` runs plan-first with Cline sandboxing:
+
+- isolated `HOME=<target>/home`
+- `--plan`
+- `--auto-approve false`
+- `--data-dir <target>/sandbox`
+- `CLINE_SANDBOX=1`
+- `CLINE_COMMAND_PERMISSIONS` denies command execution and redirects
+
+There is no third permission profile.
 
 ## Usage
 
@@ -41,9 +58,10 @@ Use an absolute target path:
 
 ```bash
 python3 cli-tools/nddev_cline.py list --json
-python3 cli-tools/nddev_cline.py plan --setup balanced --target /absolute/target --json
-python3 cli-tools/nddev_cline.py install --setup balanced --target /absolute/target --json
-python3 cli-tools/nddev_cline.py switch --setup safe --target /absolute/target --json
+python3 cli-tools/nddev_cline.py plan --target /absolute/target --json
+python3 cli-tools/nddev_cline.py install --target /absolute/target --json
+python3 cli-tools/nddev_cline.py switch --profile safe --target /absolute/target --json
+python3 cli-tools/nddev_cline.py migrate --profile full-auto --target /absolute/target --json
 python3 cli-tools/nddev_cline.py restore --backup 0 --target /absolute/target --json
 python3 cli-tools/nddev_cline.py remove --target /absolute/target --json
 ```
@@ -56,29 +74,15 @@ python3 cli-tools/nddev_cline.py install-cli --target /absolute/target --json
 python3 cli-tools/nddev_cline.py update-cli --target /absolute/target --json
 ```
 
-`install-cli` runs only `bun add --global --exact --trust cline@3.0.46`
-with target-owned `BUN_INSTALL_GLOBAL_DIR`, `BUN_INSTALL_BIN`,
-`BUN_INSTALL_CACHE_DIR`, temp `HOME`, and temp XDG directories. The explicit
-trust is limited to the official pinned `cline` package because registry
-metadata declares `postinstall` and platform optional dependencies. Existing or
-partial target-owned CLI software surfaces must use `update-cli` or repair;
-`install-cli` only accepts an absent software surface, and current installs are
-idempotent. `update-cli` on an absent target-owned CLI install is a deterministic
-domain failure with no target or parent artifacts created. `software-status` is
-read-only and validates the deterministic
-software manifest and tree digest without executing the target binary. The
-machine-owned bounds and measured baseline live in `build/manifest.json` under
-`software_lifecycle.bounds`.
+`install-cli` uses npm with a staged target-owned global prefix, cache, npmrc,
+global npmrc, `HOME`, temp directory, and XDG directories. It preflights Node.js,
+verifies npm registry metadata for `cline@3.0.46` against the pinned tarball,
+integrity, and shasum in `references/cline-baseline.json`, installs the exact
+package, probes `cline --version`, writes a software manifest, and swaps the
+software surface atomically.
 
-The staged `cline --version` identity probe is fail-closed and bounded to 60
-seconds. Fresh macOS arm64 Bun stages measured 15.214 and 13.658 seconds; the
-machine-owned samples and timeout contract live in
-`references/cline-baseline.json`. A timeout aborts before the target software
-swap, so an existing install or partial repair surface remains unchanged.
-
-Setup backups live in a sibling pool marked by `NDDEV-CLINE-BACKUPS.json` and
-bound to the canonical target. A preexisting collision path without that marker
-is never removed or reused.
+`software-status` is read-only and validates the manifest and tree digest
+without executing the target binary.
 
 Launch forwards stdio and the child exit code:
 
@@ -86,22 +90,38 @@ Launch forwards stdio and the child exit code:
 python3 cli-tools/nddev_cline.py launch --target /absolute/target -- "review this repository"
 ```
 
-The launched child receives isolated `HOME`, `USERPROFILE`, `CLINE_DATA_DIR`,
-`CLINE_SANDBOX_DATA_DIR`, XDG directories, and `CLINE_COMMAND_PERMISSIONS`
-values under the target. User-provided `--auto-approve`, `--data-dir`,
-`--config`, `--hooks-dir`, and `--key` overrides are rejected because those
-surfaces are manager-owned. Provider tokens and Cline credential environment
-variables are stripped. The launch preflight lock is released before the child
-process starts.
+Caller-supplied posture, path, and auth override flags are rejected before
+launch. Provider tokens, npm tokens, Cline credential environment variables,
+and editor state are stripped from child environments.
 
-## Public validation
+Legacy 0.1.0 managed targets may be inspected, migrated, restored, or removed.
+They are never launched.
+
+## nddev-builder Content
+
+The `nddev-builder` setup projects Cline-native public content into the isolated
+target:
+
+- `home/.cline/skills/nddev-builder/SKILL.md`
+- `home/.cline/skills/nddev-builder/references/*.md`
+- `home/.cline/agents/nddev-builder.yaml`
+- `home/.cline/plugins/nddev-builder/package.json`
+- `home/.cline/plugins/nddev-builder/index.js`
+- `home/.cline/rules/nddev-managed.md`
+- `home/.cline/data/settings/cline_mcp_settings.json`
+
+The plugin uses documented `cline.plugins` package metadata. The MCP settings
+file contains an empty `mcpServers` object because this module does not ship a
+real MCP server. No marketplace, fake hook, or fake MCP server is projected.
+
+## Public Validation
 
 ```bash
 python3 cli-tools/validate_public_contracts.py
+python3 -m py_compile cli-tools/nddev_cline.py cli-tools/validate_public_contracts.py
+git diff --check
 ```
 
-The validator is dependency-free and side-effect-free. It checks version/build
-metadata, release and npm integrity baselines, exact current Cline repo/docs and
-Bun docs surfaces, setup ids, command permission schemas, builder default-on
-projection, Bun install policy, unsupported extension install/launch contract,
-unfinished-marker absence, and shared CI caller pins.
+These checks are module-local and side-effect-free. Private harness tests,
+benchmarks, platform proof, durable memory, and operational skills are not part
+of the public module.

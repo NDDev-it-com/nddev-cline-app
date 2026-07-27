@@ -1,57 +1,64 @@
 {
   "schema_version": 2,
   "name": "nddev-cline-app",
-  "build_version": "0.1.0",
+  "build_version": "0.2.0",
   "entrypoint": "python3 cli-tools/nddev_cline.py",
   "source_root": "setups",
-  "setup_ids": ["safe", "balanced", "full-auto"],
+  "setup_ids": ["nddev-builder"],
+  "profile_ids": ["full-auto", "safe"],
+  "default_setup": "nddev-builder",
+  "default_profile": "full-auto",
   "managed_files": [
-    "data/settings/global-settings.json",
-    "data/settings/cline_mcp_settings.json",
-    "rules/nddev-managed.md",
-    "data/settings/skills/nddev-builder/SKILL.md",
-    "skills/nddev-builder/SKILL.md",
-    "agents/nddev-builder.md",
-    "plugins/nddev-builder/package.json",
-    "plugins/nddev-builder/index.js",
+    "home/.cline/data/settings/global-settings.json",
+    "home/.cline/data/settings/cline_mcp_settings.json",
+    "home/.cline/rules/nddev-managed.md",
+    "home/.cline/skills/nddev-builder/SKILL.md",
+    "home/.cline/skills/nddev-builder/references/agents.md",
+    "home/.cline/skills/nddev-builder/references/hooks.md",
+    "home/.cline/skills/nddev-builder/references/mcp.md",
+    "home/.cline/skills/nddev-builder/references/native-paths.md",
+    "home/.cline/skills/nddev-builder/references/plugins.md",
+    "home/.cline/skills/nddev-builder/references/profiles-runtime.md",
+    "home/.cline/skills/nddev-builder/references/rules-memory.md",
+    "home/.cline/skills/nddev-builder/references/skills.md",
+    "home/.cline/skills/nddev-builder/references/validation.md",
+    "home/.cline/agents/nddev-builder.yaml",
+    "home/.cline/plugins/nddev-builder/package.json",
+    "home/.cline/plugins/nddev-builder/index.js",
     "NDDEV-CLINE-SETUP.json"
   ],
   "permission_policy": {
     "configuration_surface": "Cline CLI --auto-approve plus CLINE_COMMAND_PERMISSIONS JSON policy",
-    "setups": {
-      "safe": {
-        "launch_args": ["--plan", "--auto-approve", "false"],
-        "command_permissions": {
-          "allow": ["git status*", "git diff*", "git log*"],
-          "deny": ["*"],
-          "allowRedirects": false
-        }
-      },
-      "balanced": {
-        "launch_args": ["--auto-approve", "false"],
-        "command_permissions": {
-          "allow": ["git status*", "git diff*", "git log*", "npm test*", "python3 -m unittest*"],
-          "deny": ["rm -rf *", "sudo *", "git push*", "gh auth*", "cline auth*"],
-          "allowRedirects": false
-        }
-      },
+    "profiles": {
       "full-auto": {
+        "default": true,
+        "sandbox": false,
         "launch_args": ["--auto-approve", "true"],
         "command_permissions": {
           "allow": ["*"],
-          "deny": ["rm -rf *", "sudo *", "git push*", "gh auth*", "cline auth*", "cline update*"],
+          "deny": [],
+          "allowRedirects": true
+        }
+      },
+      "safe": {
+        "default": false,
+        "sandbox": true,
+        "launch_args": ["--plan", "--auto-approve", "false"],
+        "command_permissions": {
+          "allow": [],
+          "deny": ["*"],
           "allowRedirects": false
         }
       }
     },
-    "source": "setups/<id>/global-settings.json and setup stamp"
+    "source": "profiles/<id>/profile.json and setup stamp"
   },
   "builder_capability": {
-    "projection": "cline-native-skills-agents-plugin-user-files",
+    "projection": "cline-native-skills-yaml-agent-plugin-rules-user-files",
     "source_root": "plugins/nddev-builder",
-    "native_paths": ["skills", "agents", "plugins"],
+    "native_paths": ["skills", "agents", "plugins", "rules", "data/settings"],
     "default_on": true,
-    "marketplace": null
+    "plugin_distribution": "native cline.plugins package in home/.cline/plugins"
   },
   "runtime_compatibility": {
     "baseline_ref": "references/cline-baseline.json",
@@ -60,16 +67,38 @@
     "cli_package": "cline",
     "cli_command": "cline",
     "extension_tested_version": "4.0.11",
-    "vscode_extension_id": "saoudrizwan.claude-dev"
+    "vscode_extension_id": "saoudrizwan.claude-dev",
+    "supported_platforms": ["macos-arm64", "macos-x64", "ubuntu-linux-arm64", "ubuntu-linux-x64"],
+    "unsupported_platforms": ["windows"]
   },
   "software_lifecycle": {
-    "install_argv": ["bun", "add", "--global", "--exact", "--trust", "cline@3.0.46"],
-    "install_environment": "minimal-allowlist-target-owned-bun-global",
+    "install_argv": [
+      "npm",
+      "install",
+      "--global",
+      "--prefix",
+      "<stage-global>",
+      "--cache",
+      "<stage-cache>",
+      "--userconfig",
+      "<stage-npmrc>",
+      "--globalconfig",
+      "<stage-global-npmrc>",
+      "--registry",
+      "https://registry.npmjs.org/",
+      "--fund=false",
+      "--audit=false",
+      "--ignore-scripts=false",
+      "cline@3.0.46"
+    ],
+    "install_environment": "minimal-allowlist-target-owned-npm-global-prefix",
+    "registry_metadata_preflight": "npm view cline@3.0.46 version/dist with pinned tarball, integrity, and shasum",
+    "node_preflight": "Node.js 20+ required; 22 recommended",
     "status_validation": "manifest-tree-digest-no-exec",
     "install_precondition": "absent target-owned CLI software surface",
     "update_precondition": "installed or partial target-owned CLI software surface; absent fails without side effects",
     "absent_update_policy": "domain failure: Cline CLI is not installed; use install-cli; zero target or parent artifacts",
-    "preflight_policy": "lstat-no-follow current-user-private target and parent before Bun network",
+    "preflight_policy": "lstat-no-follow current-user-private target and parent before npm registry/install work",
     "transaction_directories": "unique private mkdtemp staging with transaction-owned rollback",
     "partial_state_policy": "install rejects any replace path or owned software parent; update may repair safe partial state",
     "current_idempotent": true,
@@ -82,9 +111,7 @@
     },
     "bounds": {
       "max_tree_paths": 50000,
-      "max_tree_bytes": 536870912,
-      "measured_cline_3_0_46_macos_arm64_paths": 25617,
-      "measured_cline_3_0_46_macos_arm64_bytes": 310408610
+      "max_tree_bytes": 536870912
     },
     "layout": {
       "visible_command": "bin/cline",
