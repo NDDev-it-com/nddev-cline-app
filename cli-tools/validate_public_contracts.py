@@ -36,11 +36,13 @@ SHARED_CALLERS = {
     "zizmor.yml": ".github/workflows/zizmor-sarif.yml",
 }
 RELEASE_ARCHIVE_PATHS = [
+    "AGENTS.md",
     "README.md",
     "LICENSE",
     "VERSION",
     "CHANGELOG.md",
     "SECURITY.md",
+    ".gds/repository.yaml",
     ".github",
     "build",
     "cli-tools",
@@ -85,6 +87,10 @@ REQUIRED_CONTRACT_ROOTS = {
     "references",
     "setups",
     "software",
+}
+REQUIRED_GOVERNANCE_ARCHIVE_PATHS = {
+    "AGENTS.md",
+    ".gds/repository.yaml",
 }
 PRIVATE_PATH_MARKERS = (
     ".serena",
@@ -1202,6 +1208,16 @@ def validate_release_workflow(errors: list[str]) -> None:
     require(set(runtime_paths).issubset(set(archive_paths)), "runtime paths must be a subset of archive paths", errors)
     require(REQUIRED_CONTRACT_ROOTS.issubset(set(archive_paths)), "archive paths missing contract roots", errors)
     require(REQUIRED_CONTRACT_ROOTS.issubset(set(runtime_paths)), "runtime paths missing contract roots", errors)
+    require(
+        REQUIRED_GOVERNANCE_ARCHIVE_PATHS.issubset(set(archive_paths)),
+        "archive paths missing governance source roots",
+        errors,
+    )
+    require(
+        REQUIRED_GOVERNANCE_ARCHIVE_PATHS.isdisjoint(set(runtime_paths)),
+        "runtime paths must not include governance-only source roots",
+        errors,
+    )
     for declared in [*archive_paths, *runtime_paths]:
         path = ROOT / declared
         require(path.exists(), f"release path does not exist: {declared}", errors)
