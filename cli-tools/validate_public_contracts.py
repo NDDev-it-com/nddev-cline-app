@@ -508,6 +508,8 @@ def validate_runtime_contract(errors: list[str]) -> None:
             require("write-protected verified-path handoff" in lock_policy, "launch handoff truth missing", errors)
             require("not portable fd execution" in lock_policy, "launch policy must not claim portable fd execution", errors)
             require("same-UID chmod" in lock_policy, "launch policy must disclose same-UID chmod boundary", errors)
+            require("dedicated target-internal lock directory" in lock_policy, "launch policy must use a dedicated lock directory", errors)
+            require("target root, HOME, config, TMP, XDG, runtime, and sandbox directories remain writable" in lock_policy, "launch policy must preserve runtime writability", errors)
         require("--data-dir" not in launch.get("full_auto_command", ""), "full-auto command must not include --data-dir", errors)
         require("CLINE_SANDBOX" not in launch.get("full_auto_command", ""), "full-auto command must not set sandbox env", errors)
     if isinstance(software, dict):
@@ -580,7 +582,13 @@ def validate_runtime_contract(errors: list[str]) -> None:
         )
         require(lifecycle.get("node_preflight") == expected_node_preflight, "manifest Node preflight mismatch", errors)
         handoff = lifecycle.get("launch_handoff_policy")
-        require(isinstance(handoff, str) and "path-based spawn" in handoff, "manifest launch handoff policy mismatch", errors)
+        require(
+            isinstance(handoff, str)
+            and "path-based spawn" in handoff
+            and "mutable target, HOME, config, TMP, XDG, runtime, and sandbox directories stay writable" in handoff,
+            "manifest launch handoff policy mismatch",
+            errors,
+        )
         bounds = lifecycle.get("bounds")
         require(isinstance(bounds, dict), "manifest software bounds missing", errors)
         if isinstance(bounds, dict):
@@ -631,6 +639,27 @@ def validate_launch_profiles(errors: list[str]) -> None:
         lock_unlink_error: str | None = None
         replace_error: str | None = None
         lock_file = nddev_cline.lock_path(launch_target)
+        lock_directory = nddev_cline.lock_directory_path(launch_target)
+        runtime_write_errors: list[str] = []
+        runtime_writes = [
+            Path(env["HOME"]) / ".cline" / "session-state.json",
+            Path(env["TMPDIR"]) / "cline.tmp",
+            Path(env["XDG_CONFIG_HOME"]) / "cline-config-state.json",
+            Path(env["XDG_CACHE_HOME"]) / "cline-cache-state.json",
+            Path(env["XDG_STATE_HOME"]) / "cline-state.json",
+        ]
+        if "--config" in argv:
+            config_index = argv.index("--config")
+            runtime_writes.append(Path(argv[config_index + 1]) / "runtime-write.json")
+        sandbox = env.get("CLINE_SANDBOX_DATA_DIR")
+        if sandbox:
+            runtime_writes.append(Path(sandbox) / "sandbox-write.json")
+        for path in runtime_writes:
+            try:
+                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                path.write_text("runtime-ok\n", encoding="utf-8")
+            except OSError as exc:
+                runtime_write_errors.append(f"{path}: {exc.__class__.__name__}")
         try:
             lock_file.unlink()
         except OSError as exc:
@@ -654,10 +683,13 @@ def validate_launch_profiles(errors: list[str]) -> None:
                 "env": env,
                 "lock_held": lock_file.is_file(),
                 "lock_file_mode": stat.S_IMODE(lock_file.lstat().st_mode) if lock_file.exists() else None,
+                "lock_directory_mode": stat.S_IMODE(lock_directory.lstat().st_mode) if lock_directory.exists() else None,
                 "lock_unlink_error": lock_unlink_error,
                 "lock_survived_unlink_attempt": lock_file.is_file(),
                 "replace_error": replace_error,
                 "executable_survived_replace_attempt": executable.is_file(),
+                "runtime_write_errors": runtime_write_errors,
+                "runtime_write_paths": [str(path) for path in runtime_writes],
                 "target_mode_during_child": stat.S_IMODE(launch_target.lstat().st_mode),
                 "bin_mode_during_child": stat.S_IMODE(executable.parent.lstat().st_mode),
                 "executable_mode_during_child": stat.S_IMODE(executable.lstat().st_mode),
@@ -688,13 +720,15 @@ def validate_launch_profiles(errors: list[str]) -> None:
             require("--yolo" not in argv, "full-auto must not pass --yolo", errors)
             require(full_auto.get("lock_held") is True, "launch lock was not held through child execution", errors)
             require(full_auto.get("lock_file_mode") == 0o600, "launch lock file was not owner-only", errors)
-            require(full_auto.get("target_mode_during_child") == 0o500, "target root was not read/execute-only during child execution", errors)
+            require(full_auto.get("lock_directory_mode") == 0o500, "lock directory was not read/execute-only during child execution", errors)
+            require(full_auto.get("target_mode_during_child") == 0o700, "target root must remain writable during child execution", errors)
             require(full_auto.get("bin_mode_during_child") == 0o500, "executable parent was not read/execute-only during child execution", errors)
             require(full_auto.get("executable_mode_during_child") == 0o500, "executable was not read/execute-only during child execution", errors)
             require(full_auto.get("lock_unlink_error") is not None, "child lock unlink attempt was not denied", errors)
             require(full_auto.get("lock_survived_unlink_attempt") is True, "child removed the lifecycle lock file", errors)
             require(full_auto.get("replace_error") is not None, "child executable replace attempt was not denied", errors)
             require(full_auto.get("executable_survived_replace_attempt") is True, "child replaced the executable", errors)
+            require(full_auto.get("runtime_write_errors") == [], "full-auto runtime writes were blocked", errors)
             require(
                 isinstance(full_auto.get("swap_error"), str) and "locked" in full_auto["swap_error"],
                 "manager swap at launch execution was not blocked by the lock",
@@ -718,9 +752,11 @@ def validate_launch_profiles(errors: list[str]) -> None:
             require("--plan" in argv, "safe missing --plan", errors)
             require("--data-dir" in argv and str(canonical_target / nddev_cline.CLINE_SANDBOX_RELATIVE) in argv, "safe data-dir mismatch", errors)
             require(safe.get("lock_held") is True, "safe launch lock was not held through child execution", errors)
-            require(safe.get("target_mode_during_child") == 0o500, "safe target root was not protected during child execution", errors)
+            require(safe.get("lock_directory_mode") == 0o500, "safe lock directory was not protected during child execution", errors)
+            require(safe.get("target_mode_during_child") == 0o700, "safe target root must remain writable during child execution", errors)
             require(safe.get("lock_unlink_error") is not None, "safe child lock unlink attempt was not denied", errors)
             require(safe.get("replace_error") is not None, "safe child executable replace attempt was not denied", errors)
+            require(safe.get("runtime_write_errors") == [], "safe runtime writes were blocked", errors)
             require(env.get("CLINE_SANDBOX") == "1", "safe must set CLINE_SANDBOX=1", errors)
             require("CLINE_DATA_DIR" not in env, "safe should let --data-dir drive data dir", errors)
             require(env.get("PATH") == nddev_cline.DETERMINISTIC_PATH, "safe PATH must be deterministic", errors)
@@ -856,6 +892,10 @@ def validate_npm_stage_and_timeout(errors: list[str]) -> None:
         require(lock_file.is_file(), "persistent target lock file missing after timeout", errors)
         if lock_file.is_file():
             require(stat.S_IMODE(lock_file.lstat().st_mode) == 0o600, "persistent target lock file mode mismatch", errors)
+        lock_directory = nddev_cline.lock_directory_path(target)
+        require(lock_directory.is_dir(), "persistent target lock directory missing after timeout", errors)
+        if lock_directory.is_dir():
+            require(stat.S_IMODE(lock_directory.lstat().st_mode) == 0o700, "persistent target lock directory mode mismatch after timeout", errors)
         require(not list(root.glob(".target.nddev-cline-cli-stage.*")), "npm timeout left staging directory behind", errors)
 
 
@@ -878,6 +918,8 @@ def validate_security_smokes(errors: list[str]) -> None:
         external_lock = root / "external-lock"
         external_lock.write_text("sentinel\n", encoding="utf-8")
         external_lock.chmod(0o600)
+        lock_directory = nddev_cline.lock_directory_path(locked_target)
+        lock_directory.mkdir(mode=0o700)
         os.symlink(external_lock, nddev_cline.lock_path(locked_target))
         observed_error = None
         try:
@@ -890,10 +932,13 @@ def validate_security_smokes(errors: list[str]) -> None:
         protected_target = root / "crash-protected-target"
         nddev_cline.mutate_setup(protected_target, "nddev-builder", "full-auto", "install")
         protected_canonical = protected_target.resolve()
-        protected_canonical.chmod(0o500)
+        lock_directory = nddev_cline.lock_directory_path(protected_canonical)
+        lock_directory.chmod(0o500)
+        nddev_cline.mutate_setup(protected_canonical, "nddev-builder", "safe", "switch")
         recovered = nddev_cline.inspect_target(protected_canonical)
-        require(recovered.get("state") == "managed", "protected target did not recover after stale launch mode", errors)
-        require(stat.S_IMODE(protected_canonical.lstat().st_mode) == 0o700, "protected target mode was not restored", errors)
+        require(recovered.get("profile_id") == "safe", "target with stale protected lock directory did not recover", errors)
+        require(stat.S_IMODE(protected_canonical.lstat().st_mode) == 0o700, "target root mode changed during lock-directory recovery", errors)
+        require(stat.S_IMODE(lock_directory.lstat().st_mode) == 0o700, "stale protected lock directory mode was not restored", errors)
 
         backup_target = root / "backup-target"
         nddev_cline.mutate_setup(backup_target, "nddev-builder", "full-auto", "install")

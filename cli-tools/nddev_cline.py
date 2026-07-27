@@ -36,6 +36,8 @@ COMMAND_NAME = "cline"
 STAMP_NAME = "NDDEV-CLINE-SETUP.json"
 BACKUP_POOL_NAME = "NDDEV-CLINE-BACKUPS.json"
 BACKUP_NAME = "NDDEV-CLINE-BACKUP.json"
+LOCK_DIRECTORY_NAME = ".nddev-cline-lock"
+LOCK_FILE_NAME = "lock"
 BASELINE_REF = ROOT / "references" / "cline-baseline.json"
 INSTALL_LOCK_ROOT = ROOT / "software" / "cline-cli"
 INSTALL_PACKAGE_JSON = INSTALL_LOCK_ROOT / "package.json"
@@ -682,7 +684,11 @@ def backup_pool_marker(pool: Path) -> Path:
 
 
 def lock_path(target: Path) -> Path:
-    return target / ".nddev-cline.lock"
+    return lock_directory_path(target) / LOCK_FILE_NAME
+
+
+def lock_directory_path(target: Path) -> Path:
+    return target / LOCK_DIRECTORY_NAME
 
 
 def require_lock_file(path: Path, label: str) -> os.stat_result:
@@ -754,43 +760,65 @@ def release_file_lock(descriptor: int) -> None:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
 
 
-def recover_protected_target_if_unlocked(target: Path, info: os.stat_result) -> None:
+def recover_protected_lock_directory_if_unlocked(target: Path, info: os.stat_result) -> None:
+    lock_directory = lock_directory_path(target)
     if not is_owner_protected_directory(info):
+        return
+    if not path_present(lock_path(target)):
+        lock_directory.chmod(OWNER_DIRECTORY_MODE)
         return
     try:
         descriptor = open_lock_file(target, create=False)
     except FileNotFoundError:
-        fail("target must be owned by the current user with mode 0700")
+        lock_directory.chmod(OWNER_DIRECTORY_MODE)
+        return
     try:
         acquire_file_lock(descriptor, lock_path(target))
-        target.chmod(OWNER_DIRECTORY_MODE)
+        lock_directory.chmod(OWNER_DIRECTORY_MODE)
     finally:
         release_file_lock(descriptor)
         os.close(descriptor)
 
 
-def require_accessible_target_directory(target: Path, label: str) -> os.stat_result:
-    info = require_directory(target, label)
+def ensure_lock_directory(target: Path) -> Path:
+    require_private_directory(target, "target lock parent")
+    lock_directory = lock_directory_path(target)
+    try:
+        info = lock_directory.lstat()
+    except FileNotFoundError:
+        lock_directory.mkdir(mode=OWNER_DIRECTORY_MODE)
+        lock_directory.chmod(OWNER_DIRECTORY_MODE)
+        return lock_directory
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        fail("target lock directory must be a real directory")
     if is_owner_private_directory(info):
-        return info
-    recover_protected_target_if_unlocked(target, info)
-    info = require_directory(target, label)
+        return lock_directory
+    recover_protected_lock_directory_if_unlocked(target, info)
+    info = require_directory(lock_directory, "target lock directory")
     if is_owner_private_directory(info):
-        return info
-    fail(f"{label} must be owned by the current user with mode 0700")
+        return lock_directory
+    fail("target lock directory must be owned by the current user with mode 0700")
 
 
 @contextlib.contextmanager
 def target_lock(target: Path) -> Iterator[None]:
     path = lock_path(target)
-    require_accessible_target_directory(path.parent, "target lock parent")
+    lock_directory = ensure_lock_directory(target)
     descriptor = open_lock_file(target, create=True)
     acquired = False
+    protected = False
     try:
         acquire_file_lock(descriptor, path)
         acquired = True
+        lock_directory.chmod(PROTECTED_DIRECTORY_MODE)
+        protected = True
         yield
     finally:
+        if protected:
+            with contextlib.suppress(FileNotFoundError, OSError):
+                current = lock_directory.lstat()
+                if stat.S_ISDIR(current.st_mode) and not stat.S_ISLNK(current.st_mode):
+                    lock_directory.chmod(OWNER_DIRECTORY_MODE)
         if acquired:
             release_file_lock(descriptor)
         os.close(descriptor)
@@ -827,8 +855,6 @@ def ensure_target_directory(target: Path) -> Path:
         fail("target must not be a symlink")
     if not stat.S_ISDIR(info.st_mode):
         fail("target must be a directory")
-    recover_protected_target_if_unlocked(target, info)
-    info = target.lstat()
     if not is_owner_private_directory(info):
         fail("target must be owned by the current user with mode 0700")
     return target.resolve()
@@ -962,8 +988,6 @@ def inspect_target(target: Path) -> dict[str, Any]:
         fail("target must not be a symlink")
     if not stat.S_ISDIR(info.st_mode):
         fail("target must be a directory")
-    recover_protected_target_if_unlocked(target, info)
-    info = target.lstat()
     if not is_owner_private_directory(info):
         fail("target must be owned by the current user with mode 0700")
     stamp = load_stamp(target)
@@ -1681,7 +1705,6 @@ def require_safe_executable(
 def launch_handoff_paths(target: Path) -> tuple[Path, ...]:
     package_wrapper = target / PACKAGE_WRAPPER_RELATIVE
     directories = (
-        target,
         target / "bin",
         target / "software",
         target / "software" / "cline-cli",
@@ -1980,6 +2003,7 @@ def software_presence(target: Path) -> dict[str, Any]:
 
 
 def software_status(target: Path, *, recover_protected: bool = True) -> dict[str, Any]:
+    del recover_protected
     try:
         info = target.lstat()
     except FileNotFoundError:
@@ -2001,12 +2025,7 @@ def software_status(target: Path, *, recover_protected: bool = True) -> dict[str
         fail("target must not be a symlink")
     if not stat.S_ISDIR(info.st_mode):
         fail("target must be a directory")
-    if recover_protected:
-        recover_protected_target_if_unlocked(target, info)
-    info = target.lstat()
-    if not is_owner_private_directory(info) and not (
-        not recover_protected and is_owner_protected_directory(info)
-    ):
+    if not is_owner_private_directory(info):
         fail("target must be owned by the current user with mode 0700")
     canonical_target = target.resolve()
     executable = cline_executable(canonical_target)
@@ -2425,8 +2444,6 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
             fail("target must not be a symlink")
         if not stat.S_ISDIR(info.st_mode):
             fail("target must be a directory")
-        recover_protected_target_if_unlocked(target, info)
-        info = target.lstat()
         if not is_owner_private_directory(info):
             fail("target must be owned by the current user with mode 0700")
         canonical_target = target.resolve()
