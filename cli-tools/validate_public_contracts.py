@@ -139,7 +139,9 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def tracked_files() -> set[str]:
+def repository_tracked_files() -> set[str] | None:
+    if not (ROOT / ".git").exists():
+        return None
     completed = subprocess.run(
         ["git", "ls-files"],
         cwd=ROOT,
@@ -149,16 +151,21 @@ def tracked_files() -> set[str]:
         timeout=20,
     )
     if completed.returncode != 0:
-        raise AssertionError(completed.stdout + completed.stderr)
+        return None
     return {line for line in completed.stdout.splitlines() if line}
 
 
 def _workflow_block(text: str, start: str) -> list[str]:
     lines = text.splitlines()
+    start_indent = len(start) - len(start.lstrip(" "))
     for index, line in enumerate(lines):
         if line == start:
             block: list[str] = []
             for candidate in lines[index + 1 :]:
+                if candidate.strip():
+                    indent = len(candidate) - len(candidate.lstrip(" "))
+                    if indent <= start_indent:
+                        break
                 if candidate and not candidate.startswith(" "):
                     break
                 block.append(candidate)
@@ -179,6 +186,58 @@ def _workflow_with_value(text: str, key: str) -> list[str]:
     return []
 
 
+def _workflow_mapping_keys(block: list[str]) -> set[str]:
+    keys: set[str] = set()
+    for line in block:
+        if line.startswith("      ") and not line.startswith("        ") and ":" in line:
+            keys.add(line.strip().split(":", 1)[0])
+    return keys
+
+
+def _workflow_scalar_mapping(block: list[str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in block:
+        if not line.startswith("      ") or line.startswith("        ") or ":" not in line:
+            continue
+        key, value = line.strip().split(":", 1)
+        value = value.strip()
+        if value and value != ">-":
+            values[key] = value
+    return values
+
+
+def _path_is_covered(path: str, roots: list[str]) -> bool:
+    return any(path == root or path.startswith(f"{root}/") for root in roots)
+
+
+def actual_package_files() -> set[str]:
+    files: set[str] = set()
+    for path in ROOT.rglob("*"):
+        relative = path.relative_to(ROOT)
+        if ".git" in relative.parts:
+            continue
+        if path.is_file() or path.is_symlink():
+            files.add(relative.as_posix())
+    return files
+
+
+def validate_no_symlinks_under(path: Path, label: str, errors: list[str]) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        require(False, f"{label} does not exist", errors)
+        return
+    require(not stat.S_ISLNK(info.st_mode), f"{label} must not be a symlink", errors)
+    if stat.S_ISDIR(info.st_mode):
+        for child in path.rglob("*"):
+            child_info = child.lstat()
+            require(
+                not stat.S_ISLNK(child_info.st_mode),
+                f"{child.relative_to(ROOT).as_posix()} must not be a symlink",
+                errors,
+            )
+
+
 def validate_versions(errors: list[str]) -> None:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     build = read_json("build/version.json")
@@ -188,7 +247,7 @@ def validate_versions(errors: list[str]) -> None:
     require(SEMVER.fullmatch(version) is not None, "VERSION is not SemVer", errors)
     require(build.get("build_version") == version, "build version mismatch", errors)
     require(manifest.get("build_version") == version, "manifest version mismatch", errors)
-    require(manifest.get("name") == ROOT.name, "manifest name mismatch", errors)
+    require(manifest.get("name") == contract.get("product_name"), "manifest name mismatch", errors)
     require(build.get("node_minimum_major") == nddev_cline.MIN_NODE_MAJOR, "Node minimum mismatch", errors)
     require(build.get("node_recommended_major") == nddev_cline.RECOMMENDED_NODE_MAJOR, "Node recommended mismatch", errors)
     require(build.get("nddev_builder_extension_version") == version, "builder version mismatch", errors)
@@ -1047,10 +1106,12 @@ def validate_shared_ci(errors: list[str]) -> None:
 
 
 def validate_release_workflow(errors: list[str]) -> None:
-    tracked = tracked_files()
+    tracked = repository_tracked_files()
+    artifact_mode = tracked is None
     workflow = ROOT / RELEASE_WORKFLOW
-    require(RELEASE_WORKFLOW in tracked, "release workflow must be tracked", errors)
     require(workflow.is_file(), "release workflow must exist", errors)
+    if tracked is not None:
+        require(RELEASE_WORKFLOW in tracked, "release workflow must be tracked", errors)
     if not workflow.is_file():
         return
     text = workflow.read_text(encoding="utf-8")
@@ -1061,6 +1122,11 @@ def validate_release_workflow(errors: list[str]) -> None:
     require(text.count(expected_use) == 1, "release workflow shared pin mismatch", errors)
     require("permissions: {}" in text, "release workflow top-level permissions must be empty", errors)
     publish_permissions = _workflow_block(text, "    permissions:")
+    require(
+        _workflow_scalar_mapping(publish_permissions) == REQUIRED_RELEASE_PERMISSIONS,
+        "release workflow permission set mismatch",
+        errors,
+    )
     for name, value in REQUIRED_RELEASE_PERMISSIONS.items():
         require(
             f"      {name}: {value}" in publish_permissions,
@@ -1068,6 +1134,11 @@ def validate_release_workflow(errors: list[str]) -> None:
             errors,
         )
     with_block = _workflow_block(text, "    with:")
+    require(
+        _workflow_mapping_keys(with_block) == REQUIRED_RELEASE_INPUTS,
+        "release workflow input key set mismatch",
+        errors,
+    )
     for name in REQUIRED_RELEASE_INPUTS:
         require(
             any(line.strip().startswith(f"{name}:") for line in with_block),
@@ -1089,22 +1160,31 @@ def validate_release_workflow(errors: list[str]) -> None:
     for declared in [*archive_paths, *runtime_paths]:
         path = ROOT / declared
         require(path.exists(), f"release path does not exist: {declared}", errors)
-        covered = [
-            item
-            for item in tracked
-            if item == declared or item.startswith(f"{declared}/")
-        ]
-        require(bool(covered), f"release path has no tracked files: {declared}", errors)
+        validate_no_symlinks_under(path, f"release path {declared}", errors)
+        if tracked is not None:
+            covered = [
+                item
+                for item in tracked
+                if item == declared or item.startswith(f"{declared}/")
+            ]
+            require(bool(covered), f"release path has no tracked files: {declared}", errors)
         for marker in PRIVATE_PATH_MARKERS:
             require(
                 marker not in Path(declared).parts,
                 f"release path contains private marker {marker}: {declared}",
                 errors,
             )
-    for item in sorted(tracked):
+    inventory = actual_package_files() if artifact_mode else tracked
+    for item in sorted(inventory):
         parts = Path(item).parts
         for marker in PRIVATE_PATH_MARKERS:
             require(marker not in parts, f"tracked public path contains private marker {marker}: {item}", errors)
+        if artifact_mode:
+            require(
+                _path_is_covered(item, archive_paths),
+                f"artifact path is outside release archive_paths closure: {item}",
+                errors,
+            )
 
 
 def main() -> int:
