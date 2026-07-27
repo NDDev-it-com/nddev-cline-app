@@ -95,7 +95,7 @@
       "-k"
     ],
     "target_lifecycle_lock": "held-through-child-completion",
-    "target_lifecycle_lock_policy": "The exclusive target lifecycle lock is acquired before launch preflight and remains held until the child Cline process completes and lock cleanup is restored; install, switch, migrate, restore, remove, install-cli, update-cli, and other target lifecycle mutations are denied while target software is running.",
+    "target_lifecycle_lock_policy": "The exclusive target lifecycle lock is a persistent target-internal current-user-owned 0600 regular file opened with O_NOFOLLOW and held with nonblocking fcntl.flock until the child Cline process completes. Before protection the installed software manifest and tree digest must be current. During child execution the target root and target-owned executable/software parent chain are temporarily owner read/execute only, the entrypoint and package-wrapper identities plus O_NOFOLLOW SHA-256 byte digests are revalidated immediately before path-based spawn, and install, switch, migrate, restore, remove, install-cli, update-cli, and other target lifecycle mutations are denied while target software is running. This is a write-protected verified-path handoff, not portable fd execution; without a native sandbox it does not claim resistance to deliberate same-UID chmod attacks.",
     "streams_child_stdio": true,
     "successful_child_output_wrapped": false,
     "environment_scope": "child-process-only",
@@ -136,7 +136,7 @@
     "managed_file_mode": "0600",
     "managed_directory_mode": "0700",
     "new_target_mode": "0700",
-    "lock": "exclusive sibling directory",
+    "lock": "persistent target-internal 0600 fcntl.flock file",
     "preserve_unmanaged_files": true,
     "preserve_unmanaged_settings_keys": true,
     "reject_symlink_targets": true,

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -19,6 +20,11 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NoReturn
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows is rejected for runtime lifecycle.
+    fcntl = None  # type: ignore[assignment]
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG_ROOT = ROOT / "setups"
@@ -61,6 +67,8 @@ LEGACY_BUILD_VERSIONS = {"0.1.0"}
 OWNER_FILE_MODE = 0o600
 OWNER_DIRECTORY_MODE = 0o700
 OWNER_EXECUTABLE_MODE = 0o700
+PROTECTED_DIRECTORY_MODE = 0o500
+PROTECTED_EXECUTABLE_MODE = 0o500
 METADATA_MAX_BYTES = 256 * 1024
 MANAGED_PAYLOAD_MAX_BYTES = 8 * 1024 * 1024
 SOFTWARE_TREE_MAX_BYTES = 512 * 1024 * 1024
@@ -271,6 +279,14 @@ def is_owner_only_file(info: os.stat_result) -> bool:
 
 def is_owner_private_directory(info: os.stat_result) -> bool:
     if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        return False
+    if hasattr(os, "geteuid") and owner_of(info) != os.geteuid():
+        return False
+    return True
+
+
+def is_owner_protected_directory(info: os.stat_result) -> bool:
+    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != PROTECTED_DIRECTORY_MODE:
         return False
     if hasattr(os, "geteuid") and owner_of(info) != os.geteuid():
         return False
@@ -669,25 +685,115 @@ def lock_path(target: Path) -> Path:
     return target / ".nddev-cline.lock"
 
 
+def require_lock_file(path: Path, label: str) -> os.stat_result:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail(f"{label} is missing")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail(f"{label} must be a regular non-symlink file")
+    if info.st_nlink != 1:
+        fail(f"{label} must not have hard-link aliases")
+    if not is_owner_only_file(info):
+        fail(f"{label} must be owned by the current user with mode 0600")
+    return info
+
+
+def open_lock_file(target: Path, *, create: bool) -> int:
+    path = lock_path(target)
+    flags = os.O_RDWR
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        if not create:
+            raise
+        try:
+            descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+        except OSError as exc:
+            fail(f"cannot create target lock file {path}: {exc}")
+        os.fchmod(descriptor, OWNER_FILE_MODE)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            fail("target lock file must not be a symlink")
+        fail(f"cannot open target lock file {path}: {exc}")
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            fail("target lock file must be a regular file")
+        if not is_owner_only_file(opened):
+            fail("target lock file must be owned by the current user with mode 0600")
+        current = require_lock_file(path, "target lock file")
+        if identity_of(current) != identity_of(opened):
+            fail_concurrent("target lock file changed while it was being opened")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def acquire_file_lock(descriptor: int, path: Path) -> None:
+    if fcntl is None:
+        fail("target lifecycle locks require POSIX fcntl.flock")
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fail(f"target is locked: {path}")
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            fail(f"target is locked: {path}")
+        fail(f"cannot acquire target lock {path}: {exc}")
+
+
+def release_file_lock(descriptor: int) -> None:
+    if fcntl is not None:
+        with contextlib.suppress(OSError):
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+def recover_protected_target_if_unlocked(target: Path, info: os.stat_result) -> None:
+    if not is_owner_protected_directory(info):
+        return
+    try:
+        descriptor = open_lock_file(target, create=False)
+    except FileNotFoundError:
+        fail("target must be owned by the current user with mode 0700")
+    try:
+        acquire_file_lock(descriptor, lock_path(target))
+        target.chmod(OWNER_DIRECTORY_MODE)
+    finally:
+        release_file_lock(descriptor)
+        os.close(descriptor)
+
+
+def require_accessible_target_directory(target: Path, label: str) -> os.stat_result:
+    info = require_directory(target, label)
+    if is_owner_private_directory(info):
+        return info
+    recover_protected_target_if_unlocked(target, info)
+    info = require_directory(target, label)
+    if is_owner_private_directory(info):
+        return info
+    fail(f"{label} must be owned by the current user with mode 0700")
+
+
 @contextlib.contextmanager
 def target_lock(target: Path) -> Iterator[None]:
     path = lock_path(target)
-    require_private_directory(path.parent, "target lock parent")
-    created = False
+    require_accessible_target_directory(path.parent, "target lock parent")
+    descriptor = open_lock_file(target, create=True)
+    acquired = False
     try:
-        os.mkdir(path, OWNER_DIRECTORY_MODE)
-    except FileExistsError:
-        fail(f"target is locked: {path}")
-    except OSError as exc:
-        fail(f"cannot create target lock {path}: {exc}")
-    created = True
-    try:
+        acquire_file_lock(descriptor, path)
+        acquired = True
         yield
     finally:
-        with contextlib.suppress(FileNotFoundError, OSError):
-            if created:
-                require_private_directory(path, "target lock")
-            path.rmdir()
+        if acquired:
+            release_file_lock(descriptor)
+        os.close(descriptor)
 
 
 def require_explicit_absolute_target(raw_target: str | None) -> Path:
@@ -721,6 +827,8 @@ def ensure_target_directory(target: Path) -> Path:
         fail("target must not be a symlink")
     if not stat.S_ISDIR(info.st_mode):
         fail("target must be a directory")
+    recover_protected_target_if_unlocked(target, info)
+    info = target.lstat()
     if not is_owner_private_directory(info):
         fail("target must be owned by the current user with mode 0700")
     return target.resolve()
@@ -854,6 +962,8 @@ def inspect_target(target: Path) -> dict[str, Any]:
         fail("target must not be a symlink")
     if not stat.S_ISDIR(info.st_mode):
         fail("target must be a directory")
+    recover_protected_target_if_unlocked(target, info)
+    info = target.lstat()
     if not is_owner_private_directory(info):
         fail("target must be owned by the current user with mode 0700")
     stamp = load_stamp(target)
@@ -1568,6 +1678,78 @@ def require_safe_executable(
     return info
 
 
+def launch_handoff_paths(target: Path) -> tuple[Path, ...]:
+    package_wrapper = target / PACKAGE_WRAPPER_RELATIVE
+    directories = (
+        target,
+        target / "bin",
+        target / "software",
+        target / "software" / "cline-cli",
+        target / "software" / "cline-cli" / "install",
+        target / "software" / "cline-cli" / "install" / "project",
+        target / "software" / "cline-cli" / "install" / "project" / "node_modules",
+        package_wrapper.parents[2],
+        package_wrapper.parents[1],
+        package_wrapper.parent,
+    )
+    files = (target / "bin" / COMMAND_NAME, package_wrapper)
+    return tuple(dict.fromkeys((*directories, *files)))
+
+
+@contextlib.contextmanager
+def protected_launch_handoff(target: Path) -> Iterator[None]:
+    """Temporarily remove owner-write bits from the path-exec handoff chain."""
+    records: list[tuple[Path, tuple[int, int], int]] = []
+    for path in launch_handoff_paths(target):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            fail(f"launch handoff path {path.relative_to(target)} must not be a symlink")
+        if not stat.S_ISDIR(info.st_mode) and not stat.S_ISREG(info.st_mode):
+            fail(f"launch handoff path {path.relative_to(target)} has an unsafe type")
+        if hasattr(os, "geteuid") and owner_of(info) != os.geteuid():
+            fail(f"launch handoff path {path.relative_to(target)} must be owned by the current user")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            fail(f"launch handoff path {path.relative_to(target)} must not be group/other accessible")
+        records.append((path, identity_of(info), stat.S_IMODE(info.st_mode)))
+    try:
+        for path, _identity, _mode in records:
+            info = path.lstat()
+            if stat.S_ISDIR(info.st_mode):
+                path.chmod(PROTECTED_DIRECTORY_MODE)
+            elif stat.S_ISREG(info.st_mode):
+                path.chmod(PROTECTED_EXECUTABLE_MODE)
+        yield
+    finally:
+        for path, expected_identity, original_mode in reversed(records):
+            with contextlib.suppress(FileNotFoundError, OSError):
+                info = path.lstat()
+                if identity_of(info) == expected_identity:
+                    path.chmod(original_mode)
+
+
+def revalidate_launch_handoff(target: Path, manifest: dict[str, Any]) -> None:
+    require_safe_executable(
+        cline_executable(target),
+        target,
+        "Cline CLI executable",
+        allow_hardlinks=True,
+    )
+    entrypoint = resolve_target_owned_path(
+        cline_executable(target), target, "Cline CLI executable"
+    )
+    entrypoint_digest = digest_regular_file(
+        entrypoint, "Cline CLI executable", {"value": 0}, allow_hardlinks=True
+    )
+    package_wrapper = target / PACKAGE_WRAPPER_RELATIVE
+    package_wrapper_digest = digest_regular_file(
+        package_wrapper, "Cline package wrapper", {"value": 0}, allow_hardlinks=False
+    )
+    if entrypoint_digest != manifest.get("entrypoint_sha256"):
+        fail("Cline CLI executable digest changed before launch")
+    if package_wrapper_digest != manifest.get("package_wrapper_sha256"):
+        fail("Cline package wrapper digest changed before launch")
+
+
 def resolve_target_owned_path(path: Path, root: Path, label: str) -> Path:
     try:
         info = path.lstat()
@@ -1797,7 +1979,7 @@ def software_presence(target: Path) -> dict[str, Any]:
     }
 
 
-def software_status(target: Path) -> dict[str, Any]:
+def software_status(target: Path, *, recover_protected: bool = True) -> dict[str, Any]:
     try:
         info = target.lstat()
     except FileNotFoundError:
@@ -1819,7 +2001,12 @@ def software_status(target: Path) -> dict[str, Any]:
         fail("target must not be a symlink")
     if not stat.S_ISDIR(info.st_mode):
         fail("target must be a directory")
-    if not is_owner_private_directory(info):
+    if recover_protected:
+        recover_protected_target_if_unlocked(target, info)
+    info = target.lstat()
+    if not is_owner_private_directory(info) and not (
+        not recover_protected and is_owner_protected_directory(info)
+    ):
         fail("target must be owned by the current user with mode 0700")
     canonical_target = target.resolve()
     executable = cline_executable(canonical_target)
@@ -2238,6 +2425,8 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
             fail("target must not be a symlink")
         if not stat.S_ISDIR(info.st_mode):
             fail("target must be a directory")
+        recover_protected_target_if_unlocked(target, info)
+        info = target.lstat()
         if not is_owner_private_directory(info):
             fail("target must be owned by the current user with mode 0700")
         canonical_target = target.resolve()
@@ -2383,6 +2572,11 @@ def launch_cline(target: Path, args: list[str]) -> int:
         status = software_status(canonical_target)
         if not status["installed"] or not status["current"]:
             fail("Cline CLI is not installed at the tested version in this target")
+        manifest = load_json_object(
+            software_manifest_path(canonical_target),
+            "software manifest",
+            owner_only=True,
+        )
         child_args = [
             *state["launch_args"],
             "--config",
@@ -2399,13 +2593,15 @@ def launch_cline(target: Path, args: list[str]) -> int:
             profile_id=profile_id,
             command_permissions=state["command_permissions"],
         )
-        completed = subprocess.run(
-            [str(executable), *child_args],
-            cwd=os.getcwd(),
-            env=child_env,
-            check=False,
-            timeout=None,
-        )
+        with protected_launch_handoff(canonical_target):
+            revalidate_launch_handoff(canonical_target, manifest)
+            completed = subprocess.run(
+                [str(executable), *child_args],
+                cwd=os.getcwd(),
+                env=child_env,
+                check=False,
+                timeout=None,
+            )
         return int(completed.returncode)
 
 

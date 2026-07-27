@@ -8,6 +8,7 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -442,6 +443,12 @@ def validate_runtime_contract(errors: list[str]) -> None:
             "launch lock policy must deny lifecycle mutations while software is running",
             errors,
         )
+        if isinstance(lock_policy, str):
+            require("fcntl.flock" in lock_policy, "launch lock policy must name fcntl.flock", errors)
+            require("O_NOFOLLOW" in lock_policy, "launch lock policy must name O_NOFOLLOW validation", errors)
+            require("write-protected verified-path handoff" in lock_policy, "launch handoff truth missing", errors)
+            require("not portable fd execution" in lock_policy, "launch policy must not claim portable fd execution", errors)
+            require("same-UID chmod" in lock_policy, "launch policy must disclose same-UID chmod boundary", errors)
         require("--data-dir" not in launch.get("full_auto_command", ""), "full-auto command must not include --data-dir", errors)
         require("CLINE_SANDBOX" not in launch.get("full_auto_command", ""), "full-auto command must not set sandbox env", errors)
     if isinstance(software, dict):
@@ -513,11 +520,45 @@ def validate_runtime_contract(errors: list[str]) -> None:
             f"{nddev_cline.RECOMMENDED_NODE_MAJOR} recommended"
         )
         require(lifecycle.get("node_preflight") == expected_node_preflight, "manifest Node preflight mismatch", errors)
+        handoff = lifecycle.get("launch_handoff_policy")
+        require(isinstance(handoff, str) and "path-based spawn" in handoff, "manifest launch handoff policy mismatch", errors)
         bounds = lifecycle.get("bounds")
         require(isinstance(bounds, dict), "manifest software bounds missing", errors)
         if isinstance(bounds, dict):
             require(bounds.get("max_tree_paths") == nddev_cline.SOFTWARE_TREE_MAX_PATHS, "software path bound mismatch", errors)
             require(bounds.get("max_tree_bytes") == nddev_cline.SOFTWARE_TREE_MAX_BYTES, "software byte bound mismatch", errors)
+
+
+def install_validator_stub_cline(target: Path) -> None:
+    package_wrapper = target / nddev_cline.PACKAGE_WRAPPER_RELATIVE
+    package_wrapper.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    package_wrapper.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"--version\" ]; then printf '%s\\n' "
+        f"{nddev_cline.TESTED_CLI_VERSION!r}; exit 0; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    package_wrapper.chmod(0o700)
+    visible = target / "bin" / nddev_cline.COMMAND_NAME
+    visible.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    visible.write_text(
+        "#!/bin/sh\n"
+        'SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
+        'exec "$SCRIPT_DIR"/../software/cline-cli/install/project/node_modules/cline/bin/cline "$@"\n',
+        encoding="utf-8",
+    )
+    visible.chmod(0o700)
+    for directory in sorted(
+        {path for path in (target / "bin", package_wrapper.parent, *package_wrapper.parents) if path.is_relative_to(target)},
+        key=lambda item: len(item.parts),
+    ):
+        if directory.exists() and directory.is_dir():
+            directory.chmod(0o700)
+    manifest = target / nddev_cline.SOFTWARE_MANIFEST_RELATIVE
+    manifest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    manifest.write_bytes(nddev_cline.canonical_json(nddev_cline.build_software_manifest(target.resolve())))
+    manifest.chmod(0o600)
 
 
 def validate_launch_profiles(errors: list[str]) -> None:
@@ -528,6 +569,22 @@ def validate_launch_profiles(errors: list[str]) -> None:
         executable = Path(argv[0])
         launch_target = executable.parent.parent
         swap_error: str | None = None
+        lock_unlink_error: str | None = None
+        replace_error: str | None = None
+        lock_file = nddev_cline.lock_path(launch_target)
+        try:
+            lock_file.unlink()
+        except OSError as exc:
+            lock_unlink_error = exc.__class__.__name__
+        replacement = launch_target.parent / "replacement-cline"
+        replacement.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+        replacement.chmod(0o700)
+        try:
+            os.replace(replacement, executable)
+        except OSError as exc:
+            replace_error = exc.__class__.__name__
+        finally:
+            replacement.unlink(missing_ok=True)
         try:
             nddev_cline.mutate_setup(launch_target, "nddev-builder", "safe", "switch")
         except nddev_cline.ClineSetupError as exc:
@@ -536,21 +593,22 @@ def validate_launch_profiles(errors: list[str]) -> None:
             {
                 "argv": argv,
                 "env": env,
-                "lock_held": nddev_cline.lock_path(launch_target).is_dir(),
+                "lock_held": lock_file.is_file(),
+                "lock_file_mode": stat.S_IMODE(lock_file.lstat().st_mode) if lock_file.exists() else None,
+                "lock_unlink_error": lock_unlink_error,
+                "lock_survived_unlink_attempt": lock_file.is_file(),
+                "replace_error": replace_error,
+                "executable_survived_replace_attempt": executable.is_file(),
+                "target_mode_during_child": stat.S_IMODE(launch_target.lstat().st_mode),
+                "bin_mode_during_child": stat.S_IMODE(executable.parent.lstat().st_mode),
+                "executable_mode_during_child": stat.S_IMODE(executable.lstat().st_mode),
                 "swap_error": swap_error,
             }
         )
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    original_status = nddev_cline.software_status
     original_run = subprocess.run
     try:
-        nddev_cline.software_status = lambda target: {  # type: ignore[assignment]
-            "ok": True,
-            "installed": True,
-            "current": True,
-            "target": str(target),
-        }
         subprocess.run = fake_run  # type: ignore[assignment]
         with tempfile.TemporaryDirectory(prefix="nddev-cline-launch-") as raw:
             root = Path(raw)
@@ -558,6 +616,7 @@ def validate_launch_profiles(errors: list[str]) -> None:
             target.parent.chmod(0o700)
             nddev_cline.mutate_setup(target, "nddev-builder", "full-auto", "install")
             canonical_target = target.resolve()
+            install_validator_stub_cline(canonical_target)
             rc = nddev_cline.launch_cline(canonical_target, ["hello"])
             require(rc == 0, "full-auto fake launch failed", errors)
             full_auto = captures.pop()
@@ -569,6 +628,14 @@ def validate_launch_profiles(errors: list[str]) -> None:
             require("--data-dir" not in argv, "full-auto must not pass --data-dir", errors)
             require("--yolo" not in argv, "full-auto must not pass --yolo", errors)
             require(full_auto.get("lock_held") is True, "launch lock was not held through child execution", errors)
+            require(full_auto.get("lock_file_mode") == 0o600, "launch lock file was not owner-only", errors)
+            require(full_auto.get("target_mode_during_child") == 0o500, "target root was not read/execute-only during child execution", errors)
+            require(full_auto.get("bin_mode_during_child") == 0o500, "executable parent was not read/execute-only during child execution", errors)
+            require(full_auto.get("executable_mode_during_child") == 0o500, "executable was not read/execute-only during child execution", errors)
+            require(full_auto.get("lock_unlink_error") is not None, "child lock unlink attempt was not denied", errors)
+            require(full_auto.get("lock_survived_unlink_attempt") is True, "child removed the lifecycle lock file", errors)
+            require(full_auto.get("replace_error") is not None, "child executable replace attempt was not denied", errors)
+            require(full_auto.get("executable_survived_replace_attempt") is True, "child replaced the executable", errors)
             require(
                 isinstance(full_auto.get("swap_error"), str) and "locked" in full_auto["swap_error"],
                 "manager swap at launch execution was not blocked by the lock",
@@ -592,11 +659,13 @@ def validate_launch_profiles(errors: list[str]) -> None:
             require("--plan" in argv, "safe missing --plan", errors)
             require("--data-dir" in argv and str(canonical_target / nddev_cline.CLINE_SANDBOX_RELATIVE) in argv, "safe data-dir mismatch", errors)
             require(safe.get("lock_held") is True, "safe launch lock was not held through child execution", errors)
+            require(safe.get("target_mode_during_child") == 0o500, "safe target root was not protected during child execution", errors)
+            require(safe.get("lock_unlink_error") is not None, "safe child lock unlink attempt was not denied", errors)
+            require(safe.get("replace_error") is not None, "safe child executable replace attempt was not denied", errors)
             require(env.get("CLINE_SANDBOX") == "1", "safe must set CLINE_SANDBOX=1", errors)
             require("CLINE_DATA_DIR" not in env, "safe should let --data-dir drive data dir", errors)
             require(env.get("PATH") == nddev_cline.DETERMINISTIC_PATH, "safe PATH must be deterministic", errors)
     finally:
-        nddev_cline.software_status = original_status  # type: ignore[assignment]
         subprocess.run = original_run  # type: ignore[assignment]
 
 
@@ -724,7 +793,10 @@ def validate_npm_stage_and_timeout(errors: list[str]) -> None:
         require(sentinel.is_file(), "npm timeout removed the existing runtime", errors)
         if sentinel.is_file():
             require(nddev_cline.sha256_bytes(sentinel.read_bytes()) == sentinel_before, "npm timeout changed the existing runtime", errors)
-        require(not nddev_cline.lock_path(target).exists(), "npm timeout left target lock behind", errors)
+        lock_file = nddev_cline.lock_path(target)
+        require(lock_file.is_file(), "persistent target lock file missing after timeout", errors)
+        if lock_file.is_file():
+            require(stat.S_IMODE(lock_file.lstat().st_mode) == 0o600, "persistent target lock file mode mismatch", errors)
         require(not list(root.glob(".target.nddev-cline-cli-stage.*")), "npm timeout left staging directory behind", errors)
 
 
@@ -753,8 +825,16 @@ def validate_security_smokes(errors: list[str]) -> None:
             nddev_cline.mutate_setup(locked_target, "nddev-builder", "full-auto", "install")
         except nddev_cline.ClineSetupError as exc:
             observed_error = str(exc)
-        require(observed_error is not None and "locked" in observed_error, "symlink lock path was not rejected", errors)
+        require(observed_error is not None and "lock" in observed_error, "symlink lock path was not rejected", errors)
         require(external_lock.read_text(encoding="utf-8") == "sentinel\n", "external lock target was changed", errors)
+
+        protected_target = root / "crash-protected-target"
+        nddev_cline.mutate_setup(protected_target, "nddev-builder", "full-auto", "install")
+        protected_canonical = protected_target.resolve()
+        protected_canonical.chmod(0o500)
+        recovered = nddev_cline.inspect_target(protected_canonical)
+        require(recovered.get("state") == "managed", "protected target did not recover after stale launch mode", errors)
+        require(stat.S_IMODE(protected_canonical.lstat().st_mode) == 0o700, "protected target mode was not restored", errors)
 
         backup_target = root / "backup-target"
         nddev_cline.mutate_setup(backup_target, "nddev-builder", "full-auto", "install")

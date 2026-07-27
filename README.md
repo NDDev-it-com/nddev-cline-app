@@ -100,6 +100,16 @@ child Cline process completes and lock cleanup is restored. Target lifecycle
 mutations, including install, switch, migrate, restore, remove, install-cli,
 and update-cli, are denied while target software is running.
 
+The launch handoff is a write-protected verified-path handoff. The manager
+holds a persistent target-internal lock file with `fcntl.flock`, temporarily
+removes owner-write permission from the target root and target-owned
+executable/software parent chain, checks that the software manifest is current
+before protection, revalidates entrypoint and package-wrapper identities plus
+`O_NOFOLLOW` SHA-256 byte digests immediately before spawning the target-owned
+executable, then restores modes after the child exits. This is not portable fd
+execution; without a native sandbox it does not claim resistance to deliberate
+same-UID `chmod` attacks.
+
 Legacy 0.1.0 managed targets may be inspected, migrated, restored, or removed.
 They are never launched.
 
