@@ -1,17 +1,30 @@
 ---
 name: nddev-builder
-description: Review and maintain native Cline setup artifacts managed by nddev-cline-app.
+description: Create, review, and maintain nddev-cline-app native Cline setup artifacts with progressive disclosure.
 ---
 
 # nddev-builder for Cline
 
-Use this skill when editing or reviewing NDDev Cline setup artifacts.
+Use this skill when working on public nddev-cline-app artifacts: setup content,
+permission profiles, Cline-native rules, skills, YAML agents, plugins, hooks
+boundaries, MCP settings, runtime launch contracts, or public validation.
 
-Rules:
+Start with the narrowest reference that matches the task:
 
-- Keep Cline state under the explicit target and `CLINE_DATA_DIR`.
-- Use only current Cline native surfaces: global settings, MCP settings, rules,
-  skills, agents, plugins, and CLI command permissions.
-- Do not install or launch the VS Code extension from this manager.
-- Do not read live provider secrets, Cline auth, VS Code state, or extension
-  state.
+- Native paths and target layout: `references/native-paths.md`
+- Skill authoring and checks: `references/skills.md`
+- Rules, AGENTS, and durable context: `references/rules-memory.md`
+- YAML agent presets: `references/agents.md`
+- Cline SDK plugins: `references/plugins.md`
+- Hook adapter boundary: `references/hooks.md`
+- MCP settings: `references/mcp.md`
+- Runtime setup/profile behavior: `references/profiles-runtime.md`
+- Public validation workflow: `references/validation.md`
+
+Keep volatile facts code-owned. Versions, package integrity, optional package
+sets, launch constants, and managed file lists live in `references/cline-baseline.json`,
+`build/version.json`, `build/manifest.json`, `config/nddev-contract.json`, and
+`cli-tools/nddev_cline.py`.
+
+Do not copy live Cline auth, editor state, provider credentials, npm tokens,
+runtime logs, caches, or private harness artifacts into the public module.

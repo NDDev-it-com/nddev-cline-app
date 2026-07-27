@@ -22,6 +22,7 @@ from typing import Any, NoReturn
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG_ROOT = ROOT / "setups"
+PROFILE_ROOT = ROOT / "profiles"
 BUILDER_ROOT = ROOT / "plugins" / "nddev-builder"
 VERSION = (ROOT / "VERSION").read_text(encoding="ascii").strip()
 PRODUCT_NAME = "nddev-cline-app"
@@ -33,8 +34,13 @@ BASELINE_REF = ROOT / "references" / "cline-baseline.json"
 TESTED_CLI_VERSION = "3.0.46"
 TESTED_EXTENSION_VERSION = "4.0.11"
 NPM_PACKAGE = "cline"
-BUN_PACKAGE_SPEC = f"{NPM_PACKAGE}@{TESTED_CLI_VERSION}"
-BUN_INSTALL_ARGV = ("add", "--global", "--exact", "--trust", BUN_PACKAGE_SPEC)
+NPM_PACKAGE_SPEC = f"{NPM_PACKAGE}@{TESTED_CLI_VERSION}"
+NPM_REGISTRY = "https://registry.npmjs.org/"
+MIN_NODE_MAJOR = 20
+RECOMMENDED_NODE_MAJOR = 22
+DEFAULT_SETUP_ID = "nddev-builder"
+DEFAULT_PROFILE_ID = "full-auto"
+LEGACY_BUILD_VERSIONS = {"0.1.0"}
 OWNER_FILE_MODE = 0o600
 OWNER_DIRECTORY_MODE = 0o700
 OWNER_EXECUTABLE_MODE = 0o700
@@ -64,9 +70,24 @@ SOFTWARE_PARENT_PATHS = tuple(
     )
 )
 PACKAGE_WRAPPER_RELATIVE = (
-    SOFTWARE_DIR_RELATIVE / "install" / "global" / "node_modules" / "cline" / "bin" / "cline"
+    SOFTWARE_DIR_RELATIVE
+    / "install"
+    / "global"
+    / "lib"
+    / "node_modules"
+    / "cline"
+    / "bin"
+    / "cline"
 )
-MANAGED_SETTINGS_KEYS = (
+CLINE_HOME_RELATIVE = Path("home") / ".cline"
+CLINE_CONFIG_RELATIVE = CLINE_HOME_RELATIVE / "data" / "settings"
+CLINE_HOOKS_RELATIVE = CLINE_HOME_RELATIVE / "hooks"
+CLINE_SANDBOX_RELATIVE = Path("sandbox")
+CLINE_GLOBAL_SETTINGS_RELATIVE = CLINE_CONFIG_RELATIVE / "global-settings.json"
+CLINE_MCP_SETTINGS_RELATIVE = CLINE_CONFIG_RELATIVE / "cline_mcp_settings.json"
+CLINE_RULES_RELATIVE = CLINE_HOME_RELATIVE / "rules" / "nddev-managed.md"
+MANAGED_SETTINGS_KEYS: tuple[str, ...] = ()
+LEGACY_MANAGED_SETTINGS_KEYS = (
     "autoApprove",
     "browser",
     "checkpoint",
@@ -82,36 +103,55 @@ MANAGED_SETTINGS_KEYS = (
     "sandbox",
     "telemetry",
 )
-BUILDER_SOURCE_FILES = (
-    (
-        Path("skills") / "nddev-builder" / "SKILL.md",
-        Path("data") / "settings" / "skills" / "nddev-builder" / "SKILL.md",
-    ),
-    (
-        Path("skills") / "nddev-builder" / "SKILL.md",
-        Path("skills") / "nddev-builder" / "SKILL.md",
-    ),
-    (
-        Path("agents") / "nddev-builder.md",
-        Path("agents") / "nddev-builder.md",
-    ),
-    (
-        Path("plugins") / "nddev-builder" / "package.json",
-        Path("plugins") / "nddev-builder" / "package.json",
-    ),
-    (
-        Path("plugins") / "nddev-builder" / "index.js",
-        Path("plugins") / "nddev-builder" / "index.js",
-    ),
-)
+
+
+def discover_builder_source_files() -> tuple[tuple[Path, Path], ...]:
+    if not BUILDER_ROOT.is_dir() or BUILDER_ROOT.is_symlink():
+        raise RuntimeError("builder source root is missing")
+    result: list[tuple[Path, Path]] = []
+    for path in sorted(BUILDER_ROOT.rglob("*"), key=lambda item: str(item.relative_to(BUILDER_ROOT))):
+        relative = path.relative_to(BUILDER_ROOT)
+        if path.is_dir():
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"unsafe builder source path: {relative}")
+        result.append((relative, CLINE_HOME_RELATIVE / relative))
+    return tuple(result)
+
+
+BUILDER_SOURCE_FILES = discover_builder_source_files()
 MANAGED_PATHS = (
-    Path("data") / "settings" / "global-settings.json",
-    Path("data") / "settings" / "cline_mcp_settings.json",
-    Path("rules") / "nddev-managed.md",
+    CLINE_GLOBAL_SETTINGS_RELATIVE,
+    CLINE_MCP_SETTINGS_RELATIVE,
+    CLINE_RULES_RELATIVE,
     *(target for _, target in BUILDER_SOURCE_FILES),
     Path(STAMP_NAME),
 )
+LEGACY_MANAGED_PATHS = (
+    Path("data") / "settings" / "global-settings.json",
+    Path("data") / "settings" / "cline_mcp_settings.json",
+    Path("rules") / "nddev-managed.md",
+    Path("data") / "settings" / "skills" / "nddev-builder" / "SKILL.md",
+    Path("skills") / "nddev-builder" / "SKILL.md",
+    Path("agents") / "nddev-builder.md",
+    Path("plugins") / "nddev-builder" / "package.json",
+    Path("plugins") / "nddev-builder" / "index.js",
+    Path(STAMP_NAME),
+)
+ALL_MANAGED_PATHS = tuple(dict.fromkeys((*MANAGED_PATHS, *LEGACY_MANAGED_PATHS)))
 STAMP_KEYS = {
+    "schema_version",
+    "product_name",
+    "build_version",
+    "setup_id",
+    "profile_id",
+    "canonical_target",
+    "managed_files",
+    "builder_projection",
+    "launch_args",
+    "command_permissions",
+}
+LEGACY_STAMP_KEYS = {
     "schema_version",
     "product_name",
     "build_version",
@@ -159,6 +199,10 @@ BLOCKED_LAUNCH_FLAGS = {
     "--data-dir",
     "--hooks-dir",
     "--key",
+    "--plan",
+    "--provider",
+    "--yolo",
+    "--zen",
     "-k",
 }
 
@@ -321,6 +365,10 @@ def managed_settings_view(settings: dict[str, Any]) -> dict[str, Any]:
     return {key: settings[key] for key in MANAGED_SETTINGS_KEYS if key in settings}
 
 
+def legacy_managed_settings_view(settings: dict[str, Any]) -> dict[str, Any]:
+    return {key: settings[key] for key in LEGACY_MANAGED_SETTINGS_KEYS if key in settings}
+
+
 def merge_settings(
     existing: dict[str, Any] | None, setup_settings: dict[str, Any]
 ) -> dict[str, Any]:
@@ -334,9 +382,16 @@ def merge_settings(
 
 
 def managed_digest(relative: Path, content: bytes) -> str:
-    if relative == Path("data") / "settings" / "global-settings.json":
+    if relative == CLINE_GLOBAL_SETTINGS_RELATIVE:
         settings = parse_json_object(content, str(relative))
         return sha256_bytes(canonical_json(managed_settings_view(settings)))
+    return sha256_bytes(content)
+
+
+def legacy_managed_digest(relative: Path, content: bytes) -> str:
+    if relative == Path("data") / "settings" / "global-settings.json":
+        settings = parse_json_object(content, str(relative))
+        return sha256_bytes(canonical_json(legacy_managed_settings_view(settings)))
     return sha256_bytes(content)
 
 
@@ -354,24 +409,8 @@ def validate_command_permissions(value: Any, label: str) -> None:
 
 
 def validate_settings(settings: dict[str, Any], label: str) -> None:
-    cline = settings.get("cline")
-    sandbox = settings.get("sandbox")
-    command = settings.get("commandExecution")
-    if not isinstance(cline, dict) or cline.get("dataDir") != "${CLINE_DATA_DIR}":
-        fail(f"{label} must bind cline.dataDir")
-    if cline.get("autoUpdate") is not False:
-        fail(f"{label} must disable automatic updates")
-    if not isinstance(sandbox, dict) or not isinstance(sandbox.get("enabled"), bool):
-        fail(f"{label} must define sandbox.enabled")
-    if not isinstance(command, dict) or "autoApprove" not in command:
-        fail(f"{label} must define commandExecution.autoApprove")
-    validate_command_permissions(settings.get("commandPermissions"), f"{label}")
-    if settings.get("telemetry") != {"enabled": False}:
-        fail(f"{label} must disable telemetry")
-    if settings.get("mcp") != {"servers": {}}:
-        fail(f"{label} must not configure live MCP servers")
-    if settings.get("cline", {}).get("plugins") != {"enabled": ["nddev-builder"]}:
-        fail(f"{label} must enable nddev-builder plugin")
+    if settings:
+        fail(f"{label} must not declare unverified global settings keys")
 
 
 def validate_mcp_settings(settings: dict[str, Any], label: str) -> None:
@@ -389,7 +428,6 @@ def validate_setup_metadata(metadata: dict[str, Any], setup_id: str) -> None:
             "managed_files",
             "builder_projection",
             "builder_default_on",
-            "launch_args",
         },
         f"setup {setup_id} metadata",
     )
@@ -398,9 +436,9 @@ def validate_setup_metadata(metadata: dict[str, Any], setup_id: str) -> None:
     if metadata["id"] != setup_id:
         fail(f"setup {setup_id} metadata identity mismatch")
     if metadata["managed_files"] != [
-        "data/settings/global-settings.json",
-        "data/settings/cline_mcp_settings.json",
-        "rules/nddev-managed.md",
+        str(CLINE_GLOBAL_SETTINGS_RELATIVE),
+        str(CLINE_MCP_SETTINGS_RELATIVE),
+        str(CLINE_RULES_RELATIVE),
     ]:
         fail(f"setup {setup_id} managed file declaration is invalid")
     if (
@@ -408,10 +446,61 @@ def validate_setup_metadata(metadata: dict[str, Any], setup_id: str) -> None:
         or metadata["builder_default_on"] is not True
     ):
         fail(f"setup {setup_id} must enable native builder projection")
+    if metadata["id"] != DEFAULT_SETUP_ID:
+        fail(f"setup {setup_id} is not the supported content setup")
+
+
+def validate_profile_metadata(metadata: dict[str, Any], profile_id: str) -> None:
+    require_exact_keys(
+        metadata,
+        {
+            "schema_version",
+            "id",
+            "description",
+            "default",
+            "sandbox",
+            "launch_args",
+            "command_permissions",
+        },
+        f"profile {profile_id} metadata",
+    )
+    if metadata["schema_version"] != 1:
+        fail(f"profile {profile_id} metadata has unsupported schema")
+    if metadata["id"] != profile_id:
+        fail(f"profile {profile_id} metadata identity mismatch")
+    if profile_id not in {"safe", "full-auto"}:
+        fail(f"unsupported profile: {profile_id}")
+    if not isinstance(metadata["default"], bool):
+        fail(f"profile {profile_id} default must be boolean")
+    if not isinstance(metadata["sandbox"], bool):
+        fail(f"profile {profile_id} sandbox must be boolean")
     if not isinstance(metadata["launch_args"], list) or not all(
         isinstance(item, str) for item in metadata["launch_args"]
     ):
-        fail(f"setup {setup_id} launch_args must be a string array")
+        fail(f"profile {profile_id} launch_args must be a string array")
+    validate_command_permissions(metadata["command_permissions"], f"profile {profile_id}")
+    if profile_id == "full-auto":
+        if metadata["default"] is not True or metadata["sandbox"] is not False:
+            fail("full-auto must be the default non-sandbox profile")
+        if metadata["launch_args"] != ["--auto-approve", "true"]:
+            fail("full-auto launch args must enable auto-approve only")
+        if metadata["command_permissions"] != {
+            "allow": ["*"],
+            "deny": [],
+            "allowRedirects": True,
+        }:
+            fail("full-auto command permissions must allow everything")
+    if profile_id == "safe":
+        if metadata["default"] is not False or metadata["sandbox"] is not True:
+            fail("safe must be the non-default sandbox profile")
+        if metadata["launch_args"] != ["--plan", "--auto-approve", "false"]:
+            fail("safe launch args must be plan mode with auto-approve disabled")
+        if metadata["command_permissions"] != {
+            "allow": [],
+            "deny": ["*"],
+            "allowRedirects": False,
+        }:
+            fail("safe command permissions must deny command execution")
 
 
 def render_builder_files() -> dict[Path, bytes]:
@@ -426,6 +515,7 @@ def render_builder_files() -> dict[Path, bytes]:
 
 def build_stamp(
     setup_id: str,
+    profile_id: str,
     desired: dict[Path, bytes],
     launch_args: list[str],
     command_permissions: dict[str, Any],
@@ -435,6 +525,7 @@ def build_stamp(
         "product_name": PRODUCT_NAME,
         "build_version": VERSION,
         "setup_id": setup_id,
+        "profile_id": profile_id,
         "canonical_target": "",
         "managed_files": {
             str(relative): managed_digest(relative, content)
@@ -454,14 +545,23 @@ def bind_stamp(stamp: dict[str, Any], canonical_target: Path) -> dict[str, Any]:
 
 
 def render_setup(
-    setup_id: str, *, existing_settings: dict[str, Any] | None = None
+    setup_id: str,
+    profile_id: str,
+    *,
+    existing_settings: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[Path, bytes]]:
     validate_setup_id(setup_id)
+    validate_setup_id(profile_id)
     setup_root = CATALOG_ROOT / setup_id
     if not setup_root.is_dir() or setup_root.is_symlink():
         fail(f"unknown setup: {setup_id}")
+    profile_root = PROFILE_ROOT / profile_id
+    if not profile_root.is_dir() or profile_root.is_symlink():
+        fail(f"unknown profile: {profile_id}")
     metadata = load_json_object(setup_root / "setup.json", f"setup {setup_id} metadata")
     validate_setup_metadata(metadata, setup_id)
+    profile = load_json_object(profile_root / "profile.json", f"profile {profile_id} metadata")
+    validate_profile_metadata(profile, profile_id)
     settings = load_json_object(
         setup_root / "global-settings.json", f"setup {setup_id}/global-settings.json"
     )
@@ -474,17 +574,18 @@ def render_setup(
     rules_md, _ = read_regular_file(setup_root / "nddev-managed.md", f"setup {setup_id}/rules")
     merged_settings = merge_settings(existing_settings, settings)
     desired: dict[Path, bytes] = {
-        Path("data") / "settings" / "global-settings.json": canonical_json(merged_settings),
-        Path("data") / "settings" / "cline_mcp_settings.json": canonical_json(mcp_settings),
-        Path("rules") / "nddev-managed.md": rules_md,
+        CLINE_GLOBAL_SETTINGS_RELATIVE: canonical_json(merged_settings),
+        CLINE_MCP_SETTINGS_RELATIVE: canonical_json(mcp_settings),
+        CLINE_RULES_RELATIVE: rules_md,
     }
     desired.update(render_builder_files())
     desired[Path(STAMP_NAME)] = canonical_json(
         build_stamp(
             setup_id,
+            profile_id,
             desired,
-            metadata["launch_args"],
-            merged_settings["commandPermissions"],
+            profile["launch_args"],
+            profile["command_permissions"],
         )
     )
     return metadata, desired
@@ -495,6 +596,8 @@ def list_setups() -> list[dict[str, Any]]:
     for path in sorted(CATALOG_ROOT.iterdir()):
         if not path.is_dir() or path.is_symlink():
             continue
+        if not (path / "setup.json").is_file():
+            continue
         metadata = load_json_object(path / "setup.json", f"setup {path.name} metadata")
         validate_setup_metadata(metadata, path.name)
         result.append(
@@ -502,6 +605,26 @@ def list_setups() -> list[dict[str, Any]]:
                 "id": metadata["id"],
                 "description": metadata["description"],
                 "builder_default_on": metadata["builder_default_on"],
+            }
+        )
+    return result
+
+
+def list_profiles() -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for path in sorted(PROFILE_ROOT.iterdir()):
+        if not path.is_dir() or path.is_symlink():
+            continue
+        if not (path / "profile.json").is_file():
+            continue
+        metadata = load_json_object(path / "profile.json", f"profile {path.name} metadata")
+        validate_profile_metadata(metadata, path.name)
+        result.append(
+            {
+                "id": metadata["id"],
+                "description": metadata["description"],
+                "default": metadata["default"],
+                "sandbox": metadata["sandbox"],
                 "launch_args": metadata["launch_args"],
             }
         )
@@ -599,7 +722,7 @@ def ensure_private_parent(target: Path, relative: Path) -> Path:
 def any_managed_path_exists(target: Path) -> bool:
     return any(
         (target / relative).exists() or (target / relative).is_symlink()
-        for relative in MANAGED_PATHS
+        for relative in ALL_MANAGED_PATHS
     )
 
 
@@ -608,13 +731,30 @@ def load_stamp(target: Path) -> dict[str, Any] | None:
     if not stamp.exists() and not stamp.is_symlink():
         return None
     value = load_json_object(stamp, "setup stamp", owner_only=True)
-    require_exact_keys(value, STAMP_KEYS, "setup stamp")
-    if (
-        value["schema_version"] != 1
-        or value["product_name"] != PRODUCT_NAME
-        or value["build_version"] != VERSION
-    ):
-        fail("setup stamp is not compatible with this build")
+    actual_keys = set(value)
+    if actual_keys == STAMP_KEYS:
+        if (
+            value["schema_version"] != 1
+            or value["product_name"] != PRODUCT_NAME
+            or value["build_version"] != VERSION
+        ):
+            fail("setup stamp is not compatible with this build")
+        validate_setup_id(value["profile_id"])
+        value["legacy"] = False
+    elif actual_keys == LEGACY_STAMP_KEYS:
+        if (
+            value["schema_version"] != 1
+            or value["product_name"] != PRODUCT_NAME
+            or value["build_version"] not in LEGACY_BUILD_VERSIONS
+        ):
+            fail("legacy setup stamp is not compatible with this build")
+        value["profile_id"] = None
+        value["legacy"] = True
+    else:
+        fail(
+            "setup stamp has invalid keys "
+            f"(missing={sorted(STAMP_KEYS - actual_keys)}, extra={sorted(actual_keys - STAMP_KEYS)})"
+        )
     if value["canonical_target"] != str(target):
         fail("setup stamp is bound to a different canonical target")
     if not isinstance(value["managed_files"], dict):
@@ -625,7 +765,8 @@ def load_stamp(target: Path) -> dict[str, Any] | None:
 
 def validate_managed_files(target: Path, stamp: dict[str, Any]) -> list[str]:
     expected = stamp["managed_files"]
-    ordered = [relative for relative in MANAGED_PATHS if str(relative) in expected]
+    known = ALL_MANAGED_PATHS if stamp.get("legacy") else MANAGED_PATHS
+    ordered = [relative for relative in known if str(relative) in expected]
     ordered.extend(Path(raw) for raw in sorted(set(expected) - {str(item) for item in ordered}))
     drift: list[str] = []
     for relative in ordered:
@@ -634,7 +775,8 @@ def validate_managed_files(target: Path, stamp: dict[str, Any]) -> list[str]:
         content, _ = read_regular_file(
             target / relative, f"managed file {relative}", owner_only=True
         )
-        if managed_digest(relative, content) != expected[str(relative)]:
+        digest = legacy_managed_digest(relative, content) if stamp.get("legacy") else managed_digest(relative, content)
+        if digest != expected[str(relative)]:
             drift.append(str(relative))
     if drift:
         fail(f"managed target drift detected: {', '.join(sorted(drift))}")
@@ -657,31 +799,37 @@ def inspect_target(target: Path) -> dict[str, Any]:
         if any_managed_path_exists(target):
             fail("unmanaged target contains nddev-managed paths")
         return {"state": "unmanaged", "target": str(target)}
-    return {
-        "state": "managed",
+    state_name = "legacy-managed" if stamp.get("legacy") else "managed"
+    result = {
+        "state": state_name,
         "target": str(target),
         "setup_id": stamp["setup_id"],
+        "profile_id": stamp["profile_id"],
         "build_version": stamp["build_version"],
         "managed_files": validate_managed_files(target, stamp),
         "builder_projection": stamp["builder_projection"],
         "launch_args": stamp["launch_args"],
         "command_permissions": stamp["command_permissions"],
     }
+    if stamp.get("legacy"):
+        result["launch_supported"] = False
+        result["migration_required"] = True
+    return result
 
 
 def read_existing_settings_if_managed(target: Path, state: dict[str, Any]) -> dict[str, Any] | None:
     if state.get("state") != "managed":
         return None
     return load_json_object(
-        target / "data" / "settings" / "global-settings.json",
-        "existing data/settings/global-settings.json",
+        target / CLINE_GLOBAL_SETTINGS_RELATIVE,
+        f"existing {CLINE_GLOBAL_SETTINGS_RELATIVE}",
         owner_only=True,
     )
 
 
-def current_managed_snapshot(target: Path) -> dict[Path, bytes | None]:
+def current_managed_snapshot(target: Path, paths: tuple[Path, ...] = ALL_MANAGED_PATHS) -> dict[Path, bytes | None]:
     snapshot: dict[Path, bytes | None] = {}
-    for relative in MANAGED_PATHS:
+    for relative in paths:
         path = target / relative
         if path.exists() or path.is_symlink():
             content, _ = read_regular_file(path, f"managed file {relative}", owner_only=True)
@@ -691,9 +839,9 @@ def current_managed_snapshot(target: Path) -> dict[Path, bytes | None]:
     return snapshot
 
 
-def prune_empty_managed_dirs(target: Path) -> None:
+def prune_empty_managed_dirs(target: Path, paths: tuple[Path, ...] = ALL_MANAGED_PATHS) -> None:
     candidates = sorted(
-        {(target / relative).parent for relative in MANAGED_PATHS},
+        {(target / relative).parent for relative in paths},
         key=lambda item: len(item.parts),
         reverse=True,
     )
@@ -707,7 +855,7 @@ def prune_empty_managed_dirs(target: Path) -> None:
 
 
 def restore_snapshot(target: Path, snapshot: dict[Path, bytes | None]) -> None:
-    for relative in sorted(MANAGED_PATHS, key=lambda item: len(item.parts), reverse=True):
+    for relative in sorted(snapshot, key=lambda item: len(item.parts), reverse=True):
         path = target / relative
         if path.exists() or path.is_symlink():
             path.unlink()
@@ -717,7 +865,7 @@ def restore_snapshot(target: Path, snapshot: dict[Path, bytes | None]) -> None:
         path = ensure_private_parent(target, relative)
         path.write_bytes(content)
         path.chmod(OWNER_FILE_MODE)
-    prune_empty_managed_dirs(target)
+    prune_empty_managed_dirs(target, tuple(snapshot))
 
 
 def replace_managed_state(
@@ -737,7 +885,7 @@ def replace_managed_state(
         temporary.chmod(OWNER_FILE_MODE)
         os.replace(temporary, path)
         path.chmod(OWNER_FILE_MODE)
-    prune_empty_managed_dirs(target)
+    prune_empty_managed_dirs(target, tuple(desired))
 
 
 def changed_paths(target: Path, desired: dict[Path, bytes | None]) -> list[str]:
@@ -767,7 +915,7 @@ def validate_backup_pool_marker(target: Path, pool: Path) -> None:
     if (
         marker["schema_version"] != 1
         or marker["product_name"] != PRODUCT_NAME
-        or marker["build_version"] != VERSION
+        or marker["build_version"] not in {VERSION, *LEGACY_BUILD_VERSIONS}
     ):
         fail("backup pool marker is not compatible with this build")
     if marker["canonical_target"] != str(target):
@@ -822,7 +970,7 @@ def validate_backup_envelope(
     if (
         envelope["schema_version"] != 1
         or envelope["product_name"] != PRODUCT_NAME
-        or envelope["build_version"] != VERSION
+        or envelope["build_version"] not in {VERSION, *LEGACY_BUILD_VERSIONS}
     ):
         fail(f"{label} is not compatible with this build")
     slot = envelope["slot"]
@@ -951,12 +1099,18 @@ def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[Path, byt
     return envelope, files
 
 
-def mutate_setup(target: Path, setup_id: str, operation: str) -> dict[str, Any]:
+def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -> dict[str, Any]:
     canonical_target = ensure_target_directory(target)
     with target_lock(canonical_target):
         state = inspect_target(canonical_target)
+        if state["state"] == "legacy-managed":
+            fail("legacy managed targets must be migrated, restored, or removed before launch")
         existing_settings = read_existing_settings_if_managed(canonical_target, state)
-        metadata, desired = render_setup(setup_id, existing_settings=existing_settings)
+        metadata, desired = render_setup(
+            setup_id,
+            profile_id,
+            existing_settings=existing_settings,
+        )
         stamp = bind_stamp(
             parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target
         )
@@ -977,6 +1131,7 @@ def mutate_setup(target: Path, setup_id: str, operation: str) -> dict[str, Any]:
         "ok": True,
         "operation": operation,
         "setup_id": setup_id,
+        "profile_id": profile_id,
         "description": metadata["description"],
         "target": str(canonical_target),
         "changed": changed,
@@ -985,7 +1140,7 @@ def mutate_setup(target: Path, setup_id: str, operation: str) -> dict[str, Any]:
     }
 
 
-def plan_setup(target: Path, setup_id: str) -> dict[str, Any]:
+def plan_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
     try:
         info = target.lstat()
     except FileNotFoundError:
@@ -996,15 +1151,27 @@ def plan_setup(target: Path, setup_id: str) -> dict[str, Any]:
         canonical_target = target.resolve()
     state = inspect_target(canonical_target)
     existing_settings = read_existing_settings_if_managed(canonical_target, state)
-    _metadata, desired = render_setup(setup_id, existing_settings=existing_settings)
+    _metadata, desired = render_setup(
+        setup_id,
+        profile_id,
+        existing_settings=existing_settings,
+    )
     if state["state"] == "managed":
         stamp = bind_stamp(
             parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target
         )
         desired[Path(STAMP_NAME)] = canonical_json(stamp)
         changed = changed_paths(canonical_target, desired)
-        operation = "switch" if state.get("setup_id") != setup_id else "install"
+        operation = (
+            "switch"
+            if state.get("setup_id") != setup_id or state.get("profile_id") != profile_id
+            else "install"
+        )
         backup_required = bool(changed)
+    elif state["state"] == "legacy-managed":
+        changed = sorted(str(path) for path in desired)
+        operation = "migrate"
+        backup_required = True
     else:
         changed = sorted(str(path) for path in desired)
         operation = "install"
@@ -1013,6 +1180,7 @@ def plan_setup(target: Path, setup_id: str) -> dict[str, Any]:
         "ok": True,
         "operation": operation,
         "setup_id": setup_id,
+        "profile_id": profile_id,
         "target": str(canonical_target),
         "state": state["state"],
         "mutates": False,
@@ -1021,14 +1189,52 @@ def plan_setup(target: Path, setup_id: str) -> dict[str, Any]:
     }
 
 
+def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
+    canonical_target = require_explicit_absolute_target(str(target))
+    with target_lock(canonical_target):
+        state = inspect_target(canonical_target)
+        if state["state"] != "legacy-managed":
+            fail("target does not contain legacy nddev-cline-app managed state")
+        metadata, desired = render_setup(setup_id, profile_id, existing_settings=None)
+        stamp = bind_stamp(
+            parse_json_object(desired[Path(STAMP_NAME)], "desired stamp"), canonical_target
+        )
+        desired[Path(STAMP_NAME)] = canonical_json(stamp)
+        for raw_relative in state["managed_files"]:
+            relative = Path(raw_relative)
+            if relative != Path(STAMP_NAME) and relative not in desired:
+                desired[relative] = None
+        changed = changed_paths(canonical_target, desired)
+        snapshot = current_managed_snapshot(canonical_target)
+        try:
+            backup_slot = create_backup(canonical_target, state)
+            replace_managed_state(canonical_target, desired, stamp)
+            post = inspect_target(canonical_target)
+        except BaseException:
+            restore_snapshot(canonical_target, snapshot)
+            raise
+    return {
+        "ok": True,
+        "operation": "migrate",
+        "setup_id": setup_id,
+        "profile_id": profile_id,
+        "description": metadata["description"],
+        "target": str(canonical_target),
+        "changed": changed,
+        "backup_slot": backup_slot,
+        "state": post["state"],
+    }
+
+
 def remove_setup(target: Path) -> dict[str, Any]:
     canonical_target = require_explicit_absolute_target(str(target))
     with target_lock(canonical_target):
         state = inspect_target(canonical_target)
-        if state["state"] != "managed":
+        if state["state"] not in {"managed", "legacy-managed"}:
             fail("target is not managed by nddev-cline-app")
         snapshot = current_managed_snapshot(canonical_target)
-        desired = {relative: None for relative in MANAGED_PATHS}
+        state_paths = tuple(Path(raw) for raw in [*state["managed_files"], STAMP_NAME])
+        desired = {relative: None for relative in state_paths}
         try:
             backup_slot = create_backup(canonical_target, state)
             replace_managed_state(canonical_target, desired, {})
@@ -1077,8 +1283,13 @@ def software_manifest_path(target: Path) -> Path:
 
 
 def cline_executable(target: Path) -> Path:
-    suffix = ".cmd" if sys.platform.startswith("win") else ""
-    return target / "bin" / f"{COMMAND_NAME}{suffix}"
+    return target / "bin" / COMMAND_NAME
+
+
+def require_supported_runtime_platform() -> None:
+    if sys.platform.startswith(("darwin", "linux")):
+        return
+    fail("nddev-cline-app 0.2.0 supports Cline CLI launch/install only on macOS and Linux")
 
 
 def path_is_relative_to(path: Path, parent: Path) -> bool:
@@ -1251,8 +1462,8 @@ def software_manifest_identity(
         fail("baseline npm package metadata is incomplete")
     return {
         "schema_version": 1,
-        "install_method": "bun-global",
-        "package_manager": "bun",
+        "install_method": "npm-global-prefix",
+        "package_manager": "npm",
         "package": NPM_PACKAGE,
         "package_spec": f"{NPM_PACKAGE}@{version}",
         "version": version,
@@ -1508,7 +1719,26 @@ def software_status(target: Path) -> dict[str, Any]:
     return result
 
 
-def install_stage_environment(stage_root: Path, live_stage: Path) -> dict[str, str]:
+def write_npm_config(stage_root: Path, global_dir: Path, cache: Path) -> tuple[Path, Path]:
+    userconfig = stage_root / "npmrc"
+    globalconfig = stage_root / "global-npmrc"
+    config = (
+        f"registry={NPM_REGISTRY}\n"
+        f"prefix={global_dir}\n"
+        f"cache={cache}\n"
+        "fund=false\n"
+        "audit=false\n"
+        "update-notifier=false\n"
+        "ignore-scripts=false\n"
+    )
+    userconfig.write_text(config, encoding="utf-8")
+    globalconfig.write_text("", encoding="utf-8")
+    userconfig.chmod(OWNER_FILE_MODE)
+    globalconfig.chmod(OWNER_FILE_MODE)
+    return userconfig, globalconfig
+
+
+def install_stage_environment(stage_root: Path, live_stage: Path) -> tuple[dict[str, str], Path, Path, Path]:
     home = stage_root / "home"
     cache = stage_root / "cache"
     tmp = stage_root / "tmp"
@@ -1517,8 +1747,6 @@ def install_stage_environment(stage_root: Path, live_stage: Path) -> dict[str, s
     xdg_state = stage_root / "xdg-state"
     global_dir = live_stage / SOFTWARE_DIR_RELATIVE / "install" / "global"
     bin_dir = live_stage / "bin"
-    cline_data = stage_root / "cline-data"
-    cline_sandbox = stage_root / "cline-sandbox"
     for directory in (
         home,
         cache,
@@ -1528,34 +1756,37 @@ def install_stage_environment(stage_root: Path, live_stage: Path) -> dict[str, s
         xdg_state,
         global_dir,
         bin_dir,
-        cline_data,
-        cline_sandbox,
     ):
         directory.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
         directory.chmod(OWNER_DIRECTORY_MODE)
+    userconfig, globalconfig = write_npm_config(stage_root, global_dir, cache)
     env = safe_child_base_environment()
     env.update(
         {
-            "BUN_INSTALL_GLOBAL_DIR": str(global_dir),
-            "BUN_INSTALL_BIN": str(bin_dir),
-            "BUN_INSTALL_CACHE_DIR": str(cache),
             "HOME": str(home),
             "USERPROFILE": str(home),
             "TMPDIR": str(tmp),
             "XDG_CONFIG_HOME": str(xdg_config),
             "XDG_CACHE_HOME": str(xdg_cache),
             "XDG_STATE_HOME": str(xdg_state),
-            "CLINE_DATA_DIR": str(cline_data),
-            "CLINE_SANDBOX": "true",
-            "CLINE_SANDBOX_DATA_DIR": str(cline_sandbox),
+            "NPM_CONFIG_USERCONFIG": str(userconfig),
+            "NPM_CONFIG_GLOBALCONFIG": str(globalconfig),
+            "NPM_CONFIG_PREFIX": str(global_dir),
+            "NPM_CONFIG_CACHE": str(cache),
+            "NPM_CONFIG_REGISTRY": NPM_REGISTRY,
+            "NPM_CONFIG_FUND": "false",
+            "NPM_CONFIG_AUDIT": "false",
+            "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+            "NO_UPDATE_NOTIFIER": "1",
         }
     )
-    return env
+    return env, userconfig, globalconfig, global_dir
 
 
 def normalize_stage_executable(live_stage: Path) -> None:
     executable = live_stage / "bin" / COMMAND_NAME
     package_wrapper = live_stage / PACKAGE_WRAPPER_RELATIVE
+    npm_bin = live_stage / SOFTWARE_DIR_RELATIVE / "install" / "global" / "bin" / COMMAND_NAME
     require_safe_executable(
         package_wrapper,
         live_stage,
@@ -1563,20 +1794,23 @@ def normalize_stage_executable(live_stage: Path) -> None:
         allow_hardlinks=False,
         owner_only_mode=False,
     )
+    require_safe_executable(
+        npm_bin,
+        live_stage,
+        "npm global Cline CLI executable",
+        allow_hardlinks=True,
+        owner_only_mode=False,
+    )
     try:
         info = executable.lstat()
     except FileNotFoundError:
-        fail("bun did not create bin/cline")
-    if stat.S_ISLNK(info.st_mode):
-        try:
-            resolved = executable.resolve(strict=True)
-        except FileNotFoundError:
-            fail("bun created a broken bin/cline symlink")
-        if not path_is_relative_to(resolved, live_stage.resolve()):
-            fail("bun created a bin/cline symlink outside the staging tree")
-    elif not stat.S_ISREG(info.st_mode):
-        fail("bun did not create a regular bin/cline executable")
-    executable.unlink()
+        info = None
+    if info is not None and stat.S_ISLNK(info.st_mode):
+        fail("staging bin/cline must not preexist as a symlink")
+    if info is not None and not stat.S_ISREG(info.st_mode):
+        fail("staging bin/cline must be a regular file")
+    if info is not None:
+        executable.unlink()
     package_from_bin = Path("..") / PACKAGE_WRAPPER_RELATIVE
     wrapper = (
         "#!/bin/sh\n"
@@ -1755,21 +1989,119 @@ def replace_software_state(target: Path, live_stage: Path, hold_parent: Path) ->
         shutil.rmtree(hold, ignore_errors=True)
 
 
-def run_bun_install(stage_root: Path, live_stage: Path) -> None:
-    env = install_stage_environment(stage_root, live_stage)
+def parse_node_major(version_output: str) -> int:
+    match = re.search(r"v?([0-9]+)\.", version_output)
+    if match is None:
+        fail("node --version did not return a major version")
+    return int(match.group(1))
+
+
+def require_node_preflight(env: dict[str, str], stage_root: Path) -> dict[str, Any]:
     completed = run_bounded_process(
-        ["bun", *BUN_INSTALL_ARGV],
+        ["node", "--version"],
         cwd=stage_root,
         env=env,
-        label="bun Cline CLI install",
+        label="Node.js preflight",
     )
     if completed.returncode != 0:
-        fail("bun failed to install the pinned Cline CLI")
+        fail("node --version failed")
+    version = completed.stdout.strip() or completed.stderr.strip()
+    major = parse_node_major(version)
+    if major < MIN_NODE_MAJOR:
+        fail(
+            f"Cline CLI requires Node.js {MIN_NODE_MAJOR}+ "
+            f"({RECOMMENDED_NODE_MAJOR} recommended); found {version}"
+        )
+    return {
+        "version": version,
+        "major": major,
+        "recommended": major >= RECOMMENDED_NODE_MAJOR,
+    }
+
+
+def npm_json(
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    label: str,
+) -> Any:
+    completed = run_bounded_process(argv, cwd=cwd, env=env, label=label)
+    if completed.returncode != 0:
+        fail(f"{label} failed")
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        fail(f"{label} did not return JSON: {exc}")
+
+
+def verify_npm_registry_metadata(stage_root: Path, env: dict[str, str]) -> None:
+    baseline = load_baseline()
+    npm = baseline.get("npm")
+    if not isinstance(npm, dict):
+        fail("baseline npm metadata missing")
+    version = npm_json(
+        ["npm", "view", NPM_PACKAGE_SPEC, "version", "--json"],
+        cwd=stage_root,
+        env=env,
+        label="npm Cline CLI version metadata",
+    )
+    dist = npm_json(
+        ["npm", "view", NPM_PACKAGE_SPEC, "dist", "--json"],
+        cwd=stage_root,
+        env=env,
+        label="npm Cline CLI dist metadata",
+    )
+    if version != TESTED_CLI_VERSION:
+        fail(f"registry returned Cline CLI {version!r}, expected {TESTED_CLI_VERSION}")
+    if not isinstance(dist, dict):
+        fail("registry Cline CLI dist metadata must be an object")
+    expected = {
+        "integrity": npm.get("integrity"),
+        "shasum": npm.get("shasum"),
+        "tarball": npm.get("tarball"),
+    }
+    for key, expected_value in expected.items():
+        if not isinstance(expected_value, str) or dist.get(key) != expected_value:
+            fail(f"registry Cline CLI dist.{key} does not match the pinned baseline")
+
+
+def run_npm_install(stage_root: Path, live_stage: Path) -> dict[str, Any]:
+    env, userconfig, globalconfig, global_dir = install_stage_environment(stage_root, live_stage)
+    node = require_node_preflight(env, stage_root)
+    verify_npm_registry_metadata(stage_root, env)
+    completed = run_bounded_process(
+        [
+            "npm",
+            "install",
+            "--global",
+            "--prefix",
+            str(global_dir),
+            "--cache",
+            env["NPM_CONFIG_CACHE"],
+            "--userconfig",
+            str(userconfig),
+            "--globalconfig",
+            str(globalconfig),
+            "--registry",
+            NPM_REGISTRY,
+            "--fund=false",
+            "--audit=false",
+            "--ignore-scripts=false",
+            NPM_PACKAGE_SPEC,
+        ],
+        cwd=stage_root,
+        env=env,
+        label="npm Cline CLI install",
+    )
+    if completed.returncode != 0:
+        fail("npm failed to install the pinned Cline CLI")
     normalize_stage_executable(live_stage)
     chmod_private_tree(live_stage)
     observed = observed_cline_version(live_stage / "bin" / COMMAND_NAME, target=live_stage)
     if observed != TESTED_CLI_VERSION:
-        fail(f"bun installed Cline CLI {observed}, expected {TESTED_CLI_VERSION}")
+        fail(f"npm installed Cline CLI {observed}, expected {TESTED_CLI_VERSION}")
+    return node
 
 
 def write_stage_manifest(live_stage: Path) -> None:
@@ -1780,6 +2112,7 @@ def write_stage_manifest(live_stage: Path) -> None:
 
 
 def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
+    require_supported_runtime_platform()
     if operation == "update-cli":
         try:
             info = target.lstat()
@@ -1803,8 +2136,8 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
                 "target": str(canonical_target),
                 "version": TESTED_CLI_VERSION,
                 "package": NPM_PACKAGE,
-                "package_manager": "bun",
-                "install_method": "bun-global",
+                "package_manager": "npm",
+                "install_method": "npm-global-prefix",
                 "executable": str(cline_executable(canonical_target)),
                 "changed": False,
             }
@@ -1835,7 +2168,7 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
         try:
             live_stage = staging / "live"
             live_stage.mkdir(mode=OWNER_DIRECTORY_MODE)
-            run_bun_install(staging, live_stage)
+            node = run_npm_install(staging, live_stage)
             chmod_private_tree(live_stage)
             write_stage_manifest(live_stage)
             replace_software_state(canonical_target, live_stage, staging)
@@ -1847,22 +2180,33 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
         "target": str(canonical_target),
         "version": TESTED_CLI_VERSION,
         "package": NPM_PACKAGE,
-        "package_manager": "bun",
-        "install_method": "bun-global",
+        "package_manager": "npm",
+        "install_method": "npm-global-prefix",
+        "node": node,
         "executable": str(cline_executable(canonical_target)),
         "changed": True,
     }
 
 
-def isolated_child_environment(target: Path, command_permissions: dict[str, Any]) -> dict[str, str]:
+def isolated_child_environment(
+    target: Path,
+    *,
+    profile_id: str,
+    command_permissions: dict[str, Any],
+) -> dict[str, str]:
     home = target / "home"
-    data = target / "data"
-    sandbox = target / "sandbox"
+    cline_home = target / CLINE_HOME_RELATIVE
+    cline_config = target / CLINE_CONFIG_RELATIVE
+    hooks = target / CLINE_HOOKS_RELATIVE
+    sandbox = target / CLINE_SANDBOX_RELATIVE
     runtime = target / "runtime"
     tmp = runtime / "tmp"
-    for directory in (home, data, sandbox, runtime, tmp):
+    for directory in (home, cline_home, cline_config, hooks, runtime, tmp):
         directory.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
         directory.chmod(OWNER_DIRECTORY_MODE)
+    if profile_id == "safe":
+        sandbox.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+        sandbox.chmod(OWNER_DIRECTORY_MODE)
     env = safe_child_base_environment()
     for name in ("TERM", "COLORTERM", "NO_COLOR", "FORCE_COLOR"):
         value = os.environ.get(name)
@@ -1872,11 +2216,6 @@ def isolated_child_environment(target: Path, command_permissions: dict[str, Any]
         {
             "HOME": str(home),
             "USERPROFILE": str(home),
-            "CLINE_DATA_DIR": str(data),
-            "CLINE_SANDBOX": "true",
-            "CLINE_SANDBOX_DATA_DIR": str(sandbox),
-            "CLINE_HOOKS_DIR": str(target / "hooks"),
-            "CLINE_SESSION_BACKEND_MODE": "local",
             "CLINE_COMMAND_PERMISSIONS": json.dumps(command_permissions, sort_keys=True),
             "TMPDIR": str(tmp),
             "XDG_CONFIG_HOME": str(runtime / "xdg-config"),
@@ -1885,6 +2224,13 @@ def isolated_child_environment(target: Path, command_permissions: dict[str, Any]
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         }
     )
+    if profile_id == "safe":
+        env.update(
+            {
+                "CLINE_SANDBOX": "1",
+                "CLINE_SANDBOX_DATA_DIR": str(sandbox),
+            }
+        )
     return env
 
 
@@ -1898,27 +2244,35 @@ def validate_launch_args(args: list[str]) -> None:
 
 
 def launch_cline(target: Path, args: list[str]) -> int:
+    require_supported_runtime_platform()
     validate_launch_args(args)
     canonical_target = require_explicit_absolute_target(str(target))
     with target_lock(canonical_target):
         state = inspect_target(canonical_target)
         if state["state"] != "managed":
             fail("target is not managed by nddev-cline-app")
+        profile_id = state["profile_id"]
+        if profile_id not in {"safe", "full-auto"}:
+            fail("target profile is not supported by this build")
         status = software_status(canonical_target)
         if not status["installed"] or not status["current"]:
             fail("Cline CLI is not installed at the tested version in this target")
         child_args = [
             *state["launch_args"],
-            "--data-dir",
-            str(canonical_target),
             "--config",
-            str(canonical_target / "data" / "settings"),
+            str(canonical_target / CLINE_CONFIG_RELATIVE),
             "--hooks-dir",
-            str(canonical_target / "hooks"),
-            *args,
+            str(canonical_target / CLINE_HOOKS_RELATIVE),
         ]
+        if profile_id == "safe":
+            child_args.extend(["--data-dir", str(canonical_target / CLINE_SANDBOX_RELATIVE)])
+        child_args.extend(args)
         executable = cline_executable(canonical_target)
-        child_env = isolated_child_environment(canonical_target, state["command_permissions"])
+        child_env = isolated_child_environment(
+            canonical_target,
+            profile_id=profile_id,
+            command_permissions=state["command_permissions"],
+        )
     completed = subprocess.run(
         [str(executable), *child_args],
         cwd=os.getcwd(),
@@ -1942,6 +2296,11 @@ def add_target_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target", required=True, help="explicit absolute Cline target")
 
 
+def add_setup_profile_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--setup", default=DEFAULT_SETUP_ID)
+    parser.add_argument("--profile", default=DEFAULT_PROFILE_ID)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1951,9 +2310,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         command_parser = subparsers.add_parser(name, help=f"{name} for a target")
         add_target_argument(command_parser)
         add_json_argument(command_parser)
-    for name in ("plan", "install", "switch"):
+    for name in ("plan", "install", "switch", "migrate"):
         command_parser = subparsers.add_parser(name, help=f"{name} a setup")
-        command_parser.add_argument("--setup", required=True)
+        add_setup_profile_arguments(command_parser)
         add_target_argument(command_parser)
         add_json_argument(command_parser)
     restore_parser = subparsers.add_parser("restore", help="restore a target-bound backup")
@@ -1984,7 +2343,16 @@ def error_result(message: str, *, json_output: bool) -> int:
 
 def run(args: argparse.Namespace) -> int:
     if args.command == "list":
-        print_payload({"ok": True, "setups": list_setups()}, json_output=args.json)
+        print_payload(
+            {
+                "ok": True,
+                "default_setup": DEFAULT_SETUP_ID,
+                "default_profile": DEFAULT_PROFILE_ID,
+                "setups": list_setups(),
+                "profiles": list_profiles(),
+            },
+            json_output=args.json,
+        )
         return 0
     if args.command == "status":
         target = require_explicit_absolute_target(args.target)
@@ -1996,11 +2364,18 @@ def run(args: argparse.Namespace) -> int:
         return 0
     if args.command == "plan":
         target = require_explicit_absolute_target(args.target)
-        print_payload(plan_setup(target, args.setup), json_output=args.json)
+        print_payload(plan_setup(target, args.setup, args.profile), json_output=args.json)
         return 0
     if args.command in {"install", "switch"}:
         target = require_explicit_absolute_target(args.target)
-        print_payload(mutate_setup(target, args.setup, args.command), json_output=args.json)
+        print_payload(
+            mutate_setup(target, args.setup, args.profile, args.command),
+            json_output=args.json,
+        )
+        return 0
+    if args.command == "migrate":
+        target = require_explicit_absolute_target(args.target)
+        print_payload(migrate_setup(target, args.setup, args.profile), json_output=args.json)
         return 0
     if args.command == "restore":
         target = require_explicit_absolute_target(args.target)

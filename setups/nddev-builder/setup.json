@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "nddev-builder",
+  "description": "Native Cline content setup for NDDev builder rules, skills, YAML agent, plugin, and empty MCP settings.",
+  "managed_files": [
+    "home/.cline/data/settings/global-settings.json",
+    "home/.cline/data/settings/cline_mcp_settings.json",
+    "home/.cline/rules/nddev-managed.md"
+  ],
+  "builder_projection": "native-skills-agents-plugin-user-files",
+  "builder_default_on": true
+}

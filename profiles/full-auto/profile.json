@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "full-auto",
+  "description": "Default no-sandbox Cline CLI profile with auto-approval enabled and native command permissions allowing all commands and redirects.",
+  "default": true,
+  "sandbox": false,
+  "launch_args": ["--auto-approve", "true"],
+  "command_permissions": {
+    "allow": ["*"],
+    "deny": [],
+    "allowRedirects": true
+  }
+}

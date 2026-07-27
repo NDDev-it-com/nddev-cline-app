@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "safe",
+  "description": "Sandboxed plan-first Cline CLI profile with auto-approval disabled and command execution denied.",
+  "default": false,
+  "sandbox": true,
+  "launch_args": ["--plan", "--auto-approve", "false"],
+  "command_permissions": {
+    "allow": [],
+    "deny": ["*"],
+    "allowRedirects": false
+  }
+}
