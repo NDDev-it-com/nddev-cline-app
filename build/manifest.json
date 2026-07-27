@@ -72,12 +72,14 @@
     "unsupported_platforms": ["windows"]
   },
   "software_lifecycle": {
+    "install_assets": [
+      "software/cline-cli/package.json",
+      "software/cline-cli/package-lock.json"
+    ],
+    "lockfile_sha256": "6edd73e2f6de4d8988431069696bf4318cd950ed3439b42b2baa4497b0874bdb",
     "install_argv": [
       "npm",
-      "install",
-      "--global",
-      "--prefix",
-      "<stage-global>",
+      "ci",
       "--cache",
       "<stage-cache>",
       "--userconfig",
@@ -88,11 +90,10 @@
       "https://registry.npmjs.org/",
       "--fund=false",
       "--audit=false",
-      "--ignore-scripts=false",
-      "cline@3.0.46"
+      "--ignore-scripts=false"
     ],
-    "install_environment": "minimal-allowlist-target-owned-npm-global-prefix",
-    "registry_metadata_preflight": "npm view cline@3.0.46 version/dist with pinned tarball, integrity, and shasum",
+    "install_environment": "minimal-allowlist-target-owned-npm-ci-project",
+    "lockfile_preflight": "parse committed package-lock.json: exact root dependency, registry-only resolved URLs, integrity for every non-link package, no file/git/remote escapes, expected Cline optional platform packages",
     "node_preflight": "Node.js 20+ required; 22 recommended",
     "status_validation": "manifest-tree-digest-no-exec",
     "install_precondition": "absent target-owned CLI software surface",
@@ -115,7 +116,8 @@
     },
     "layout": {
       "visible_command": "bin/cline",
-      "global_dir": "software/cline-cli/install/global",
+      "project_dir": "software/cline-cli/install/project",
+      "package_wrapper": "software/cline-cli/install/project/node_modules/cline/bin/cline",
       "software_manifest": "software/cline-cli.json"
     }
   }

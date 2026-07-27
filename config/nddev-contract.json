@@ -73,7 +73,7 @@
     "full_auto_command": "HOME=<absolute-target>/home CLINE_COMMAND_PERMISSIONS=<allow-all-policy> <absolute-target>/bin/cline --auto-approve true --config <absolute-target>/home/.cline/data/settings --hooks-dir <absolute-target>/home/.cline/hooks [args...]",
     "safe_command": "HOME=<absolute-target>/home CLINE_SANDBOX=1 CLINE_COMMAND_PERMISSIONS=<deny-all-policy> <absolute-target>/bin/cline --plan --auto-approve false --config <absolute-target>/home/.cline/data/settings --hooks-dir <absolute-target>/home/.cline/hooks --data-dir <absolute-target>/sandbox [args...]",
     "permissions_environment_variable": "CLINE_COMMAND_PERMISSIONS",
-    "executable_source": "validated-target-owned-npm-global-prefix-install",
+    "executable_source": "validated-target-owned-npm-ci-lockfile-install",
     "extension_launch_supported": false,
     "extension_install_supported": false,
     "extension_install_reason": "VS Code extension installation and launch require editor-managed state and are deliberately out of scope for this target-only manager.",
@@ -156,7 +156,7 @@
     "cli": {
       "supported": true,
       "tested_version": "3.0.46",
-      "source": "official npm package cline installed into a target-owned global prefix",
+      "source": "official npm package cline installed by npm ci from the committed public package-lock",
       "package": "cline",
       "package_spec": "cline@3.0.46",
       "package_manager": "npm",
@@ -165,12 +165,14 @@
         "minimum_major": 20,
         "recommended_major": 22
       },
+      "install_assets": [
+        "software/cline-cli/package.json",
+        "software/cline-cli/package-lock.json"
+      ],
+      "lockfile_sha256": "6edd73e2f6de4d8988431069696bf4318cd950ed3439b42b2baa4497b0874bdb",
       "install_argv": [
         "npm",
-        "install",
-        "--global",
-        "--prefix",
-        "<stage-global>",
+        "ci",
         "--cache",
         "<stage-cache>",
         "--userconfig",
@@ -181,10 +183,22 @@
         "https://registry.npmjs.org/",
         "--fund=false",
         "--audit=false",
-        "--ignore-scripts=false",
-        "cline@3.0.46"
+        "--ignore-scripts=false"
       ],
-      "registry_metadata_preflight": {
+      "lockfile_preflight": {
+        "root_dependency": "cline@3.0.46",
+        "registry_only_resolved_urls": true,
+        "integrity_required_for_non_link_packages": true,
+        "expected_optional_platform_packages": [
+          "@cline/cli-darwin-arm64",
+          "@cline/cli-darwin-x64",
+          "@cline/cli-linux-arm64",
+          "@cline/cli-linux-x64",
+          "@cline/cli-windows-arm64",
+          "@cline/cli-windows-x64"
+        ]
+      },
+      "registry_metadata": {
         "package": "cline",
         "version": "3.0.46",
         "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.46.tgz",
@@ -203,7 +217,6 @@
           "XDG_STATE_HOME",
           "NPM_CONFIG_USERCONFIG",
           "NPM_CONFIG_GLOBALCONFIG",
-          "NPM_CONFIG_PREFIX",
           "NPM_CONFIG_CACHE",
           "NPM_CONFIG_REGISTRY"
         ],
@@ -236,9 +249,9 @@
       },
       "layout": {
         "visible_command": "bin/cline",
-        "global_dir": "software/cline-cli/install/global",
-        "package_wrapper": "software/cline-cli/install/global/lib/node_modules/cline/bin/cline",
-        "tree_digest_fields": ["tree_digest", "entrypoint_sha256"],
+        "project_dir": "software/cline-cli/install/project",
+        "package_wrapper": "software/cline-cli/install/project/node_modules/cline/bin/cline",
+        "tree_digest_fields": ["tree_digest", "entrypoint_sha256", "lockfile_sha256"],
         "software_manifest": "software/cline-cli.json"
       }
     },

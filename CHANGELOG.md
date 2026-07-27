@@ -2,10 +2,10 @@
 
 ## 0.2.0
 
-- Replace the Bun CLI lifecycle with official-channel npm installation of
-  `cline@3.0.46` into a target-owned global prefix.
-- Add Node.js 20+ preflight, pinned npm registry metadata verification, and
-  sanitized npm cache/config/prefix handling.
+- Adopt official-channel `npm ci` installation of the frozen public Cline CLI
+  lockfile into a target-owned staging project.
+- Add Node.js 20+ preflight, committed lock contract verification, and sanitized
+  npm cache/config handling.
 - Replace setup variants with one `nddev-builder` content setup and orthogonal
   `full-auto` and `safe` profiles.
 - Make `full-auto` the default no-sandbox profile with native command

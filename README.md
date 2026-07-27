@@ -74,12 +74,13 @@ python3 cli-tools/nddev_cline.py install-cli --target /absolute/target --json
 python3 cli-tools/nddev_cline.py update-cli --target /absolute/target --json
 ```
 
-`install-cli` uses npm with a staged target-owned global prefix, cache, npmrc,
-global npmrc, `HOME`, temp directory, and XDG directories. It preflights Node.js,
-verifies npm registry metadata for `cline@3.0.46` against the pinned tarball,
-integrity, and shasum in `references/cline-baseline.json`, installs the exact
-package, probes `cline --version`, writes a software manifest, and swaps the
-software surface atomically.
+`install-cli` uses `npm ci` from the committed public package lock in a clean
+target-owned staging project with isolated cache, npmrc, global npmrc, `HOME`,
+temp directory, and XDG directories. It preflights Node.js, validates the lock
+digest and package-lock shape against `references/cline-baseline.json`, runs the
+official Cline lifecycle scripts only after frozen resolution, probes
+`cline --version`, writes a software manifest, and swaps the software surface
+atomically.
 
 `software-status` is read-only and validates the manifest and tree digest
 without executing the target binary.

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -63,6 +64,14 @@ def require(condition: bool, message: str, errors: list[str]) -> None:
 
 def expected_managed_files() -> set[str]:
     return {str(path) for path in nddev_cline.MANAGED_PATHS}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def validate_versions(errors: list[str]) -> None:
@@ -177,6 +186,59 @@ def validate_setups_and_profiles(errors: list[str]) -> None:
     )
 
 
+def validate_install_lock_assets(errors: list[str]) -> None:
+    build = read_json("build/version.json")
+    manifest = read_json("build/manifest.json")
+    contract = read_json("config/nddev-contract.json")
+    baseline = read_json("references/cline-baseline.json")
+    package_json = read_json("software/cline-cli/package.json")
+    package_lock = read_json("software/cline-cli/package-lock.json")
+    lock_digest = sha256_file(ROOT / "software/cline-cli/package-lock.json")
+    expected_digest = build.get("cline_cli_lockfile_sha256")
+    require(lock_digest == expected_digest, "build lockfile digest mismatch", errors)
+    require(baseline.get("package_manager", {}).get("lockfile_sha256") == lock_digest, "baseline lockfile digest mismatch", errors)
+    require(manifest.get("software_lifecycle", {}).get("lockfile_sha256") == lock_digest, "manifest lockfile digest mismatch", errors)
+    require(contract.get("software_install", {}).get("cli", {}).get("lockfile_sha256") == lock_digest, "contract lockfile digest mismatch", errors)
+    cli_package = build.get("cline_cli_package")
+    cli_version = build.get("cline_cli_tested")
+    expected_dependency = {cli_package: cli_version}
+    require(package_json.get("dependencies") == expected_dependency, "install package.json root dependency mismatch", errors)
+    packages = package_lock.get("packages")
+    require(package_lock.get("lockfileVersion") == 3, "package-lock lockfileVersion mismatch", errors)
+    require(isinstance(packages, dict), "package-lock packages missing", errors)
+    if not isinstance(packages, dict):
+        return
+    root = packages.get("")
+    require(isinstance(root, dict), "package-lock root package missing", errors)
+    if isinstance(root, dict):
+        require(root.get("dependencies") == expected_dependency, "package-lock root dependency mismatch", errors)
+    optional_expected = set(baseline.get("npm", {}).get("optional_dependencies", {}))
+    optional_seen: set[str] = set()
+    for package_path, metadata in packages.items():
+        require(isinstance(package_path, str), "package-lock package key must be string", errors)
+        require(isinstance(metadata, dict), f"package-lock package {package_path} must be object", errors)
+        if not isinstance(package_path, str) or not isinstance(metadata, dict) or package_path == "":
+            continue
+        package_name = package_path.removeprefix("node_modules/")
+        if package_name in optional_expected:
+            optional_seen.add(package_name)
+            require(metadata.get("version") == cli_version, f"optional package {package_name} version mismatch", errors)
+        resolved = metadata.get("resolved")
+        if isinstance(resolved, str):
+            require(resolved.startswith(nddev_cline.NPM_REGISTRY), f"non-registry resolved URL in lock: {package_path}", errors)
+            lowered = resolved.lower()
+            require(not lowered.startswith(("git+", "file:", "http://")), f"unsafe resolved URL in lock: {package_path}", errors)
+        elif metadata.get("link") is not True:
+            require(False, f"resolved URL missing in lock: {package_path}", errors)
+        if metadata.get("link") is not True:
+            require(isinstance(metadata.get("integrity"), str), f"integrity missing in lock: {package_path}", errors)
+    require(optional_seen == optional_expected, "optional Cline platform package set mismatch", errors)
+    try:
+        nddev_cline.validate_install_lock_contract()
+    except nddev_cline.ClineSetupError as exc:
+        require(False, f"manager lock validation failed: {exc}", errors)
+
+
 def validate_builder(errors: list[str]) -> None:
     contract = read_json("config/nddev-contract.json")
     build = read_json("build/version.json")
@@ -229,7 +291,7 @@ def validate_runtime_contract(errors: list[str]) -> None:
         require(launch.get("extension_launch_supported") is False, "extension launch must be unsupported", errors)
         require(launch.get("extension_install_supported") is False, "extension install must be unsupported", errors)
         require(launch.get("token_environment_inheritance") == "stripped", "tokens must be stripped", errors)
-        require(launch.get("executable_source") == "validated-target-owned-npm-global-prefix-install", "runtime executable source mismatch", errors)
+        require(launch.get("executable_source") == "validated-target-owned-npm-ci-lockfile-install", "runtime executable source mismatch", errors)
         require(launch.get("blocks_user_managed_flags") == EXPECTED["blocked_launch_flags"], "contract launch flag blocklist mismatch", errors)
         require("legacy" in launch.get("legacy_launch_policy", ""), "legacy launch policy missing", errors)
         require("--data-dir" not in launch.get("full_auto_command", ""), "full-auto command must not include --data-dir", errors)
@@ -242,11 +304,13 @@ def validate_runtime_contract(errors: list[str]) -> None:
         if isinstance(cli, dict):
             require(cli.get("package_manager") == "npm", "CLI package manager must be npm", errors)
             require(cli.get("registry") == nddev_cline.NPM_REGISTRY, "npm registry mismatch", errors)
+            require(cli.get("lockfile_sha256") == build.get("cline_cli_lockfile_sha256"), "contract CLI lock digest mismatch", errors)
+            require(cli.get("install_argv", [None])[0:2] == ["npm", "ci"], "contract install argv must use npm ci", errors)
             if isinstance(npm, dict):
-                registry_preflight = cli.get("registry_metadata_preflight", {})
-                require(registry_preflight.get("integrity") == npm.get("integrity"), "registry integrity mismatch", errors)
-                require(registry_preflight.get("shasum") == npm.get("shasum"), "registry shasum mismatch", errors)
-                require(registry_preflight.get("tarball") == npm.get("tarball"), "registry tarball mismatch", errors)
+                registry_metadata = cli.get("registry_metadata", {})
+                require(registry_metadata.get("integrity") == npm.get("integrity"), "registry integrity mismatch", errors)
+                require(registry_metadata.get("shasum") == npm.get("shasum"), "registry shasum mismatch", errors)
+                require(registry_metadata.get("tarball") == npm.get("tarball"), "registry tarball mismatch", errors)
             require(
                 cli.get("node_preflight")
                 == {
@@ -261,7 +325,8 @@ def validate_runtime_contract(errors: list[str]) -> None:
     lifecycle = manifest.get("software_lifecycle")
     require(isinstance(lifecycle, dict), "manifest software_lifecycle missing", errors)
     if isinstance(lifecycle, dict):
-        require(lifecycle.get("install_argv", [None])[0] == "npm", "manifest install argv must use npm", errors)
+        require(lifecycle.get("install_argv", [None])[0:2] == ["npm", "ci"], "manifest install argv must use npm ci", errors)
+        require(lifecycle.get("lockfile_sha256") == build.get("cline_cli_lockfile_sha256"), "manifest lock digest mismatch", errors)
         expected_node_preflight = (
             f"Node.js {nddev_cline.MIN_NODE_MAJOR}+ required; "
             f"{nddev_cline.RECOMMENDED_NODE_MAJOR} recommended"
@@ -279,7 +344,21 @@ def validate_launch_profiles(errors: list[str]) -> None:
 
     def fake_run(argv: list[str], *, cwd: str, env: dict[str, str], check: bool, timeout: None) -> subprocess.CompletedProcess[str]:
         del cwd, check, timeout
-        captures.append({"argv": argv, "env": env})
+        executable = Path(argv[0])
+        launch_target = executable.parent.parent
+        swap_error: str | None = None
+        try:
+            nddev_cline.mutate_setup(launch_target, "nddev-builder", "safe", "switch")
+        except nddev_cline.ClineSetupError as exc:
+            swap_error = str(exc)
+        captures.append(
+            {
+                "argv": argv,
+                "env": env,
+                "lock_held": nddev_cline.lock_path(launch_target).is_dir(),
+                "swap_error": swap_error,
+            }
+        )
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     original_status = nddev_cline.software_status
@@ -308,6 +387,12 @@ def validate_launch_profiles(errors: list[str]) -> None:
             require("--hooks-dir" in argv and str(canonical_target / nddev_cline.CLINE_HOOKS_RELATIVE) in argv, "full-auto hooks path mismatch", errors)
             require("--data-dir" not in argv, "full-auto must not pass --data-dir", errors)
             require("--yolo" not in argv, "full-auto must not pass --yolo", errors)
+            require(full_auto.get("lock_held") is True, "launch lock was not held through child execution", errors)
+            require(
+                isinstance(full_auto.get("swap_error"), str) and "locked" in full_auto["swap_error"],
+                "manager swap at launch execution was not blocked by the lock",
+                errors,
+            )
             require("CLINE_DATA_DIR" not in env, "full-auto must not set CLINE_DATA_DIR", errors)
             require("CLINE_SANDBOX" not in env, "full-auto must not set CLINE_SANDBOX", errors)
             require(env.get("HOME") == str(canonical_target / "home"), "full-auto HOME mismatch", errors)
@@ -325,6 +410,7 @@ def validate_launch_profiles(errors: list[str]) -> None:
             env = safe["env"]
             require("--plan" in argv, "safe missing --plan", errors)
             require("--data-dir" in argv and str(canonical_target / nddev_cline.CLINE_SANDBOX_RELATIVE) in argv, "safe data-dir mismatch", errors)
+            require(safe.get("lock_held") is True, "safe launch lock was not held through child execution", errors)
             require(env.get("CLINE_SANDBOX") == "1", "safe must set CLINE_SANDBOX=1", errors)
             require("CLINE_DATA_DIR" not in env, "safe should let --data-dir drive data dir", errors)
             require(env.get("PATH") == nddev_cline.DETERMINISTIC_PATH, "safe PATH must be deterministic", errors)
@@ -340,16 +426,17 @@ def validate_npm_stage_and_timeout(errors: list[str]) -> None:
         live = root / "live"
         stage.mkdir(mode=0o700)
         live.mkdir(mode=0o700)
-        env, userconfig, globalconfig, global_dir = nddev_cline.install_stage_environment(stage, live)
+        env, userconfig, globalconfig, project_dir = nddev_cline.install_stage_environment(stage, live)
+        require(project_dir == live / nddev_cline.INSTALL_PROJECT_RELATIVE, "npm stage project path mismatch", errors)
         require(env.get("PATH") == nddev_cline.DETERMINISTIC_PATH, "npm stage PATH must be deterministic", errors)
-        require(env.get("NPM_CONFIG_PREFIX") == str(global_dir), "npm prefix env mismatch", errors)
+        require(env.get("NPM_CONFIG_PREFIX") is None, "npm stage must not set a global prefix", errors)
         require(env.get("NPM_CONFIG_CACHE") == str(stage / "cache"), "npm cache env mismatch", errors)
         require(env.get("NPM_CONFIG_USERCONFIG") == str(userconfig), "npm userconfig env mismatch", errors)
         require(env.get("NPM_CONFIG_GLOBALCONFIG") == str(globalconfig), "npm globalconfig env mismatch", errors)
         require("CLINE_DATA_DIR" not in env and "CLINE_SANDBOX" not in env, "npm stage must not set Cline runtime env", errors)
         npmrc = userconfig.read_text(encoding="utf-8")
         require(f"registry={nddev_cline.NPM_REGISTRY}" in npmrc, "npmrc registry mismatch", errors)
-        require("prefix=" in npmrc and str(global_dir) in npmrc, "npmrc prefix mismatch", errors)
+        require("prefix=" not in npmrc, "npmrc must not set a global prefix", errors)
         require("auth" not in npmrc.lower() and "token" not in npmrc.lower(), "npmrc must not contain auth material", errors)
         require(nddev_cline.parse_node_major("v20.19.0") == 20, "Node parser mismatch", errors)
         target = root / "target"
@@ -435,15 +522,95 @@ def validate_security_smokes(errors: list[str]) -> None:
         require(sibling_marker.read_text(encoding="utf-8") == "external\n", "external sibling marker was changed", errors)
         require(nddev_cline.backup_pool(sibling_target.resolve()).is_dir(), "target-internal backup pool missing", errors)
 
-    sticky_parent = Path(tempfile.gettempdir())
-    sticky_target = sticky_parent / f"nddev-cline-sticky-{os.getpid()}-{time.time_ns()}"
-    try:
+        for name, relative, profile_id in (
+            ("home", Path("home"), "full-auto"),
+            ("hooks", nddev_cline.CLINE_HOOKS_RELATIVE, "full-auto"),
+            ("runtime", Path("runtime"), "full-auto"),
+            ("sandbox", nddev_cline.CLINE_SANDBOX_RELATIVE, "safe"),
+        ):
+            symlink_target = root / f"runtime-symlink-{name}"
+            symlink_target.mkdir(mode=0o700)
+            external = root / f"external-{name}"
+            if name in {"hooks", "sandbox"}:
+                external = root / f"missing-{name}"
+            else:
+                external.mkdir(mode=0o700)
+            parent = symlink_target / relative.parent
+            current = symlink_target
+            for part in relative.parent.parts:
+                current = current / part
+                current.mkdir(mode=0o700, exist_ok=True)
+                current.chmod(0o700)
+            os.symlink(external, symlink_target / relative)
+            observed_error = None
+            try:
+                nddev_cline.isolated_child_environment(
+                    symlink_target,
+                    profile_id=profile_id,
+                    command_permissions={"allow": [], "deny": ["*"], "allowRedirects": False},
+                )
+            except nddev_cline.ClineSetupError as exc:
+                observed_error = str(exc)
+            require(observed_error is not None and "real directory" in observed_error, f"{name} symlink runtime path was not rejected", errors)
+
+        stale_target = root / "stale-build"
+        nddev_cline.mutate_setup(stale_target, "nddev-builder", "full-auto", "install")
+        stale_canonical = stale_target.resolve()
+        stamp_path = stale_canonical / nddev_cline.STAMP_NAME
+        stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+        stamp["build_version"] = "prior-build"
+        stamp_path.write_bytes(nddev_cline.canonical_json(stamp))
+        stamp_path.chmod(0o600)
+        state = nddev_cline.inspect_target(stale_canonical)
+        require(state.get("state") == "managed" and state.get("needs_update") is True, "prior-build stamp was not reported as needs_update", errors)
+        plan = nddev_cline.plan_setup(stale_canonical, "nddev-builder", "full-auto")
+        require(plan.get("operation") == "install", "prior-build current-schema target was not plannable", errors)
+        nddev_cline.mutate_setup(stale_canonical, "nddev-builder", "full-auto", "install")
+        state = nddev_cline.inspect_target(stale_canonical)
+        require(state.get("needs_update") is False, "install did not refresh prior-build stamp", errors)
+
+        legacy_target = root / "legacy-restore"
+        legacy_target.mkdir(mode=0o700)
+        legacy_canonical = legacy_target.resolve()
+        legacy_files = {
+            Path("data/settings/global-settings.json"): b"{\n  \"commandPermissions\": {\n    \"allow\": [],\n    \"allowRedirects\": false,\n    \"deny\": [\"*\"]\n  }\n}\n",
+            Path("data/settings/cline_mcp_settings.json"): b"{\n  \"mcpServers\": {}\n}\n",
+            Path("rules/nddev-managed.md"): b"# legacy rules\n",
+        }
+        for relative, content in legacy_files.items():
+            destination = nddev_cline.ensure_private_parent(legacy_canonical, relative)
+            destination.write_bytes(content)
+            destination.chmod(0o600)
+        legacy_stamp = {
+            "schema_version": 1,
+            "product_name": nddev_cline.PRODUCT_NAME,
+            "build_version": next(iter(nddev_cline.LEGACY_BUILD_VERSIONS)),
+            "setup_id": "safe",
+            "canonical_target": str(legacy_canonical),
+            "managed_files": {
+                str(relative): nddev_cline.legacy_managed_digest(relative, content)
+                for relative, content in legacy_files.items()
+            },
+            "builder_projection": "cline-native-skills-agents-plugin-user-files",
+            "launch_args": ["--plan", "--auto-approve", "false"],
+            "command_permissions": {"allow": [], "deny": ["*"], "allowRedirects": False},
+        }
+        stamp_file = legacy_canonical / nddev_cline.STAMP_NAME
+        stamp_file.write_bytes(nddev_cline.canonical_json(legacy_stamp))
+        stamp_file.chmod(0o600)
+        legacy_state = nddev_cline.inspect_target(legacy_canonical)
+        require(legacy_state.get("state") == "legacy-managed", "legacy target was not recognized", errors)
+        nddev_cline.migrate_setup(legacy_canonical, "nddev-builder", "full-auto")
+        restored = nddev_cline.restore_backup(legacy_canonical, 0)
+        require(restored.get("state") == "legacy-managed", "legacy restore did not restore legacy state", errors)
+
+        sticky_parent = root / "sticky-parent"
+        sticky_parent.mkdir(mode=0o1777)
+        sticky_parent.chmod(0o1777)
+        sticky_target = sticky_parent / "valid-target"
         nddev_cline.mutate_setup(sticky_target, "nddev-builder", "full-auto", "install")
         state = nddev_cline.inspect_target(sticky_target.resolve())
-        require(state.get("state") == "managed", "sticky-temp target did not become managed", errors)
-    finally:
-        if sticky_target.exists() and not sticky_target.is_symlink() and sticky_target.is_dir():
-            shutil.rmtree(sticky_target)
+        require(state.get("state") == "managed", "sticky-parent target did not become managed", errors)
 
     with tempfile.TemporaryDirectory(prefix="nddev-cline-path-") as raw_root:
         root = Path(raw_root)
@@ -456,7 +623,7 @@ def validate_security_smokes(errors: list[str]) -> None:
         live = root / "live"
         stage.mkdir(mode=0o700)
         live.mkdir(mode=0o700)
-        env, _userconfig, _globalconfig, _global_dir = nddev_cline.install_stage_environment(stage, live)
+        env, _userconfig, _globalconfig, _project_dir = nddev_cline.install_stage_environment(stage, live)
         observed: dict[str, Any] = {}
 
         def fake_which(name: str, *, path: str | None = None) -> str:
@@ -509,6 +676,8 @@ def validate_current_sources(errors: list[str]) -> None:
         "https://raw.githubusercontent.com/cline/cline/main/apps/cli/README.md",
         "https://raw.githubusercontent.com/cline/cline/main/sdk/packages/shared/src/storage/paths.ts",
         "https://raw.githubusercontent.com/cline/cline/main/apps/cli/src/commands/config.ts",
+        "https://docs.npmjs.com/cli/v11/commands/npm-ci/",
+        "https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/",
         "https://registry.npmjs.org/cline/latest",
     }
     require(required.issubset(set(sources)), "current official source set missing required sources", errors)
@@ -543,6 +712,7 @@ def main() -> int:
     errors: list[str] = []
     validate_versions(errors)
     validate_setups_and_profiles(errors)
+    validate_install_lock_assets(errors)
     validate_builder(errors)
     validate_runtime_contract(errors)
     validate_launch_profiles(errors)

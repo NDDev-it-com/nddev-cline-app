@@ -31,11 +31,22 @@ STAMP_NAME = "NDDEV-CLINE-SETUP.json"
 BACKUP_POOL_NAME = "NDDEV-CLINE-BACKUPS.json"
 BACKUP_NAME = "NDDEV-CLINE-BACKUP.json"
 BASELINE_REF = ROOT / "references" / "cline-baseline.json"
+INSTALL_LOCK_ROOT = ROOT / "software" / "cline-cli"
+INSTALL_PACKAGE_JSON = INSTALL_LOCK_ROOT / "package.json"
+INSTALL_PACKAGE_LOCK = INSTALL_LOCK_ROOT / "package-lock.json"
 TESTED_CLI_VERSION = "3.0.46"
 TESTED_EXTENSION_VERSION = "4.0.11"
 NPM_PACKAGE = "cline"
 NPM_PACKAGE_SPEC = f"{NPM_PACKAGE}@{TESTED_CLI_VERSION}"
 NPM_REGISTRY = "https://registry.npmjs.org/"
+EXPECTED_CLINE_OPTIONAL_PACKAGES = {
+    "@cline/cli-darwin-arm64",
+    "@cline/cli-darwin-x64",
+    "@cline/cli-linux-arm64",
+    "@cline/cli-linux-x64",
+    "@cline/cli-windows-arm64",
+    "@cline/cli-windows-x64",
+}
 MIN_NODE_MAJOR = 20
 RECOMMENDED_NODE_MAJOR = 22
 DEFAULT_SETUP_ID = "nddev-builder"
@@ -69,11 +80,9 @@ SOFTWARE_PARENT_PATHS = tuple(
         key=str,
     )
 )
+INSTALL_PROJECT_RELATIVE = SOFTWARE_DIR_RELATIVE / "install" / "project"
 PACKAGE_WRAPPER_RELATIVE = (
-    SOFTWARE_DIR_RELATIVE
-    / "install"
-    / "global"
-    / "lib"
+    INSTALL_PROJECT_RELATIVE
     / "node_modules"
     / "cline"
     / "bin"
@@ -696,10 +705,12 @@ def ensure_target_directory(target: Path) -> Path:
     try:
         info = target.lstat()
     except FileNotFoundError:
-        require_private_directory(target.parent, "target parent")
+        require_safe_target_parent_for_creation(target.parent)
         target.mkdir(mode=OWNER_DIRECTORY_MODE)
         target.chmod(OWNER_DIRECTORY_MODE)
-        return target.resolve()
+        created = target.resolve()
+        require_private_directory(created, "target")
+        return created
     if stat.S_ISLNK(info.st_mode):
         fail("target must not be a symlink")
     if not stat.S_ISDIR(info.st_mode):
@@ -707,6 +718,37 @@ def ensure_target_directory(target: Path) -> Path:
     if not is_owner_private_directory(info):
         fail("target must be owned by the current user with mode 0700")
     return target.resolve()
+
+
+def require_safe_target_parent_for_creation(parent: Path) -> None:
+    info = require_directory(parent, "target parent")
+    if is_owner_private_directory(info):
+        return
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & stat.S_ISVTX:
+        return
+    fail("target parent must be private to the current user or sticky")
+
+
+def ensure_private_directory_under_target(target: Path, relative: Path, label: str) -> Path:
+    if relative.is_absolute() or ".." in relative.parts:
+        fail(f"unsafe {label}: {relative}")
+    current = target
+    for part in relative.parts:
+        current = current / part
+        if current.exists() or current.is_symlink():
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                fail(f"{label} {current.relative_to(target)} must be a real directory")
+            if not is_owner_private_directory(info):
+                fail(
+                    f"{label} {current.relative_to(target)} "
+                    "must be owned by the current user with mode 0700"
+                )
+        else:
+            current.mkdir(mode=OWNER_DIRECTORY_MODE)
+            current.chmod(OWNER_DIRECTORY_MODE)
+    return current
 
 
 def ensure_private_parent(target: Path, relative: Path) -> Path:
@@ -747,11 +789,13 @@ def load_stamp(target: Path) -> dict[str, Any] | None:
         if (
             value["schema_version"] != 1
             or value["product_name"] != PRODUCT_NAME
-            or value["build_version"] != VERSION
         ):
-            fail("setup stamp is not compatible with this build")
+            fail("setup stamp schema or product identity is not compatible with this manager")
+        if not isinstance(value["build_version"], str):
+            fail("setup stamp build_version must be a string")
         validate_setup_id(value["profile_id"])
         value["legacy"] = False
+        value["needs_update"] = value["build_version"] != VERSION
     elif actual_keys == LEGACY_STAMP_KEYS:
         if (
             value["schema_version"] != 1
@@ -761,6 +805,7 @@ def load_stamp(target: Path) -> dict[str, Any] | None:
             fail("legacy setup stamp is not compatible with this build")
         value["profile_id"] = None
         value["legacy"] = True
+        value["needs_update"] = True
     else:
         fail(
             "setup stamp has invalid keys "
@@ -821,6 +866,7 @@ def inspect_target(target: Path) -> dict[str, Any]:
         "builder_projection": stamp["builder_projection"],
         "launch_args": stamp["launch_args"],
         "command_permissions": stamp["command_permissions"],
+        "needs_update": stamp["needs_update"],
     }
     if stamp.get("legacy"):
         result["launch_supported"] = False
@@ -926,9 +972,10 @@ def validate_backup_pool_marker(target: Path, pool: Path) -> None:
     if (
         marker["schema_version"] != 1
         or marker["product_name"] != PRODUCT_NAME
-        or marker["build_version"] not in {VERSION, *LEGACY_BUILD_VERSIONS}
     ):
-        fail("backup pool marker is not compatible with this build")
+        fail("backup pool marker schema or product identity is not compatible with this manager")
+    if not isinstance(marker["build_version"], str):
+        fail("backup pool marker build_version must be a string")
     if marker["canonical_target"] != str(target):
         fail("backup pool is bound to a different canonical target")
 
@@ -965,7 +1012,7 @@ def ensure_backup_pool(target: Path) -> Path:
     try:
         info = pool.lstat()
     except FileNotFoundError:
-        require_private_directory(target.parent, "backup pool parent")
+        require_private_directory(pool.parent, "backup pool parent")
         pool.mkdir(mode=OWNER_DIRECTORY_MODE)
         pool.chmod(OWNER_DIRECTORY_MODE)
         write_backup_pool_marker(target, pool)
@@ -989,9 +1036,10 @@ def validate_backup_envelope(
     if (
         envelope["schema_version"] != 1
         or envelope["product_name"] != PRODUCT_NAME
-        or envelope["build_version"] not in {VERSION, *LEGACY_BUILD_VERSIONS}
     ):
-        fail(f"{label} is not compatible with this build")
+        fail(f"{label} schema or product identity is not compatible with this manager")
+    if not isinstance(envelope["build_version"], str):
+        fail(f"{label} build_version must be a string")
     slot = envelope["slot"]
     if not isinstance(slot, int) or slot < 0 or slot > 9:
         fail(f"{label} slot is invalid")
@@ -1273,9 +1321,13 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
     canonical_target = require_explicit_absolute_target(str(target))
     with target_lock(canonical_target):
         state = inspect_target(canonical_target)
-        if state["state"] != "managed":
+        if state["state"] not in {"managed", "legacy-managed"}:
             fail("target is not managed by nddev-cline-app")
         envelope, desired = load_backup(canonical_target, slot)
+        for raw_relative in [*state["managed_files"], STAMP_NAME]:
+            relative = Path(raw_relative)
+            if relative not in desired:
+                desired[relative] = None
         snapshot = current_managed_snapshot(canonical_target)
         try:
             replace_managed_state(canonical_target, desired, {})
@@ -1288,6 +1340,8 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
         "operation": "restore",
         "target": str(canonical_target),
         "setup_id": post["setup_id"],
+        "profile_id": post["profile_id"],
+        "state": post["state"],
         "restored_from_slot": slot,
         "restored_source_setup_id": envelope["source_setup_id"],
     }
@@ -1295,6 +1349,54 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
 
 def load_baseline() -> dict[str, Any]:
     return load_json_object(BASELINE_REF, "Cline baseline")
+
+
+def lockfile_sha256() -> str:
+    content, _ = read_regular_file(
+        INSTALL_PACKAGE_LOCK,
+        "Cline CLI package-lock.json",
+        max_bytes=METADATA_MAX_BYTES,
+    )
+    return sha256_bytes(content)
+
+
+def validate_install_lock_contract() -> None:
+    baseline = load_baseline()
+    expected_lock = baseline.get("package_manager", {}).get("lockfile_sha256")
+    if not isinstance(expected_lock, str) or lockfile_sha256() != expected_lock:
+        fail("Cline CLI package-lock digest does not match the pinned baseline")
+    package_json = load_json_object(INSTALL_PACKAGE_JSON, "Cline CLI package.json")
+    package_lock = load_json_object(INSTALL_PACKAGE_LOCK, "Cline CLI package-lock.json")
+    dependencies = package_json.get("dependencies")
+    if dependencies != {NPM_PACKAGE: TESTED_CLI_VERSION}:
+        fail("Cline CLI package.json must pin the exact Cline dependency")
+    packages = package_lock.get("packages")
+    if package_lock.get("lockfileVersion") != 3 or not isinstance(packages, dict):
+        fail("Cline CLI package-lock.json must be lockfileVersion 3 with packages")
+    root = packages.get("")
+    if not isinstance(root, dict) or root.get("dependencies") != dependencies:
+        fail("Cline CLI package-lock root dependency mismatch")
+    optional_seen: set[str] = set()
+    for path, metadata in packages.items():
+        if not isinstance(path, str) or not isinstance(metadata, dict):
+            fail("Cline CLI package-lock packages must be objects")
+        if path == "":
+            continue
+        name = path.removeprefix("node_modules/")
+        if name in EXPECTED_CLINE_OPTIONAL_PACKAGES:
+            optional_seen.add(name)
+            if metadata.get("version") != TESTED_CLI_VERSION:
+                fail(f"Cline CLI optional package {name} version mismatch")
+        resolved = metadata.get("resolved")
+        if isinstance(resolved, str):
+            if not resolved.startswith(NPM_REGISTRY):
+                fail(f"Cline CLI package-lock has non-registry resolution for {path}")
+        elif metadata.get("link") is not True:
+            fail(f"Cline CLI package-lock package {path} is missing resolved")
+        if metadata.get("link") is not True and not isinstance(metadata.get("integrity"), str):
+            fail(f"Cline CLI package-lock package {path} is missing integrity")
+    if optional_seen != EXPECTED_CLINE_OPTIONAL_PACKAGES:
+        fail("Cline CLI package-lock missing expected optional platform packages")
 
 
 def software_manifest_path(target: Path) -> Path:
@@ -1491,13 +1593,15 @@ def software_manifest_identity(
         fail("baseline npm package metadata is incomplete")
     return {
         "schema_version": 1,
-        "install_method": "npm-global-prefix",
+        "install_method": "npm-ci-lockfile",
         "package_manager": "npm",
         "package": NPM_PACKAGE,
         "package_spec": f"{NPM_PACKAGE}@{version}",
         "version": version,
         "executable": f"bin/{COMMAND_NAME}",
-        "global_dir": str(SOFTWARE_DIR_RELATIVE / "install" / "global"),
+        "project_dir": str(INSTALL_PROJECT_RELATIVE),
+        "lockfile": str(INSTALL_PACKAGE_LOCK.relative_to(ROOT)),
+        "lockfile_sha256": lockfile_sha256(),
         "bin_dir": "bin",
         "integrity": integrity,
         "shasum": shasum,
@@ -1748,12 +1852,11 @@ def software_status(target: Path) -> dict[str, Any]:
     return result
 
 
-def write_npm_config(stage_root: Path, global_dir: Path, cache: Path) -> tuple[Path, Path]:
+def write_npm_config(stage_root: Path, cache: Path) -> tuple[Path, Path]:
     userconfig = stage_root / "npmrc"
     globalconfig = stage_root / "global-npmrc"
     config = (
         f"registry={NPM_REGISTRY}\n"
-        f"prefix={global_dir}\n"
         f"cache={cache}\n"
         "fund=false\n"
         "audit=false\n"
@@ -1774,7 +1877,7 @@ def install_stage_environment(stage_root: Path, live_stage: Path) -> tuple[dict[
     xdg_config = stage_root / "xdg-config"
     xdg_cache = stage_root / "xdg-cache"
     xdg_state = stage_root / "xdg-state"
-    global_dir = live_stage / SOFTWARE_DIR_RELATIVE / "install" / "global"
+    project_dir = live_stage / INSTALL_PROJECT_RELATIVE
     bin_dir = live_stage / "bin"
     for directory in (
         home,
@@ -1783,12 +1886,12 @@ def install_stage_environment(stage_root: Path, live_stage: Path) -> tuple[dict[
         xdg_config,
         xdg_cache,
         xdg_state,
-        global_dir,
+        project_dir,
         bin_dir,
     ):
         directory.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
         directory.chmod(OWNER_DIRECTORY_MODE)
-    userconfig, globalconfig = write_npm_config(stage_root, global_dir, cache)
+    userconfig, globalconfig = write_npm_config(stage_root, cache)
     env = safe_child_base_environment()
     env.update(
         {
@@ -1800,7 +1903,6 @@ def install_stage_environment(stage_root: Path, live_stage: Path) -> tuple[dict[
             "XDG_STATE_HOME": str(xdg_state),
             "NPM_CONFIG_USERCONFIG": str(userconfig),
             "NPM_CONFIG_GLOBALCONFIG": str(globalconfig),
-            "NPM_CONFIG_PREFIX": str(global_dir),
             "NPM_CONFIG_CACHE": str(cache),
             "NPM_CONFIG_REGISTRY": NPM_REGISTRY,
             "NPM_CONFIG_FUND": "false",
@@ -1809,13 +1911,25 @@ def install_stage_environment(stage_root: Path, live_stage: Path) -> tuple[dict[
             "NO_UPDATE_NOTIFIER": "1",
         }
     )
-    return env, userconfig, globalconfig, global_dir
+    return env, userconfig, globalconfig, project_dir
+
+
+def seed_locked_install_project(project_dir: Path) -> None:
+    for source in (INSTALL_PACKAGE_JSON, INSTALL_PACKAGE_LOCK):
+        content, _ = read_regular_file(
+            source,
+            f"Cline CLI install asset {source.relative_to(ROOT)}",
+            max_bytes=METADATA_MAX_BYTES,
+        )
+        destination = project_dir / source.name
+        destination.write_bytes(content)
+        destination.chmod(OWNER_FILE_MODE)
 
 
 def normalize_stage_executable(live_stage: Path) -> None:
     executable = live_stage / "bin" / COMMAND_NAME
     package_wrapper = live_stage / PACKAGE_WRAPPER_RELATIVE
-    npm_bin = live_stage / SOFTWARE_DIR_RELATIVE / "install" / "global" / "bin" / COMMAND_NAME
+    npm_bin = live_stage / INSTALL_PROJECT_RELATIVE / "node_modules" / ".bin" / COMMAND_NAME
     require_safe_executable(
         package_wrapper,
         live_stage,
@@ -1826,7 +1940,7 @@ def normalize_stage_executable(live_stage: Path) -> None:
     require_safe_executable(
         npm_bin,
         live_stage,
-        "npm global Cline CLI executable",
+        "npm local Cline CLI executable",
         allow_hardlinks=True,
         owner_only_mode=False,
     )
@@ -2096,16 +2210,14 @@ def verify_npm_registry_metadata(stage_root: Path, env: dict[str, str]) -> None:
 
 
 def run_npm_install(stage_root: Path, live_stage: Path) -> dict[str, Any]:
-    env, userconfig, globalconfig, global_dir = install_stage_environment(stage_root, live_stage)
+    env, userconfig, globalconfig, project_dir = install_stage_environment(stage_root, live_stage)
+    validate_install_lock_contract()
+    seed_locked_install_project(project_dir)
     node = require_node_preflight(env, stage_root)
-    verify_npm_registry_metadata(stage_root, env)
     completed = run_bounded_process(
         [
             trusted_executable("npm"),
-            "install",
-            "--global",
-            "--prefix",
-            str(global_dir),
+            "ci",
             "--cache",
             env["NPM_CONFIG_CACHE"],
             "--userconfig",
@@ -2117,11 +2229,10 @@ def run_npm_install(stage_root: Path, live_stage: Path) -> dict[str, Any]:
             "--fund=false",
             "--audit=false",
             "--ignore-scripts=false",
-            NPM_PACKAGE_SPEC,
         ],
-        cwd=stage_root,
+        cwd=project_dir,
         env=env,
-        label="npm Cline CLI install",
+        label="npm Cline CLI locked install",
     )
     if completed.returncode != 0:
         fail("npm failed to install the pinned Cline CLI")
@@ -2166,7 +2277,7 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
                 "version": TESTED_CLI_VERSION,
                 "package": NPM_PACKAGE,
                 "package_manager": "npm",
-                "install_method": "npm-global-prefix",
+                "install_method": "npm-ci-lockfile",
                 "executable": str(cline_executable(canonical_target)),
                 "changed": False,
             }
@@ -2210,7 +2321,7 @@ def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
         "version": TESTED_CLI_VERSION,
         "package": NPM_PACKAGE,
         "package_manager": "npm",
-        "install_method": "npm-global-prefix",
+        "install_method": "npm-ci-lockfile",
         "node": node,
         "executable": str(cline_executable(canonical_target)),
         "changed": True,
@@ -2230,12 +2341,20 @@ def isolated_child_environment(
     sandbox = target / CLINE_SANDBOX_RELATIVE
     runtime = target / "runtime"
     tmp = runtime / "tmp"
-    for directory in (home, cline_home, cline_config, hooks, runtime, tmp):
-        directory.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-        directory.chmod(OWNER_DIRECTORY_MODE)
+    for relative, label in (
+        (Path("home"), "runtime directory"),
+        (CLINE_HOME_RELATIVE, "runtime directory"),
+        (CLINE_CONFIG_RELATIVE, "runtime directory"),
+        (CLINE_HOOKS_RELATIVE, "runtime directory"),
+        (Path("runtime"), "runtime directory"),
+        (Path("runtime") / "tmp", "runtime directory"),
+        (Path("runtime") / "xdg-config", "runtime directory"),
+        (Path("runtime") / "xdg-cache", "runtime directory"),
+        (Path("runtime") / "xdg-state", "runtime directory"),
+    ):
+        ensure_private_directory_under_target(target, relative, label)
     if profile_id == "safe":
-        sandbox.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-        sandbox.chmod(OWNER_DIRECTORY_MODE)
+        ensure_private_directory_under_target(target, CLINE_SANDBOX_RELATIVE, "runtime directory")
     env = safe_child_base_environment()
     for name in ("TERM", "COLORTERM", "NO_COLOR", "FORCE_COLOR"):
         value = os.environ.get(name)
@@ -2280,6 +2399,8 @@ def launch_cline(target: Path, args: list[str]) -> int:
         state = inspect_target(canonical_target)
         if state["state"] != "managed":
             fail("target is not managed by nddev-cline-app")
+        if state.get("needs_update"):
+            fail("target setup was written by a prior build; run install or switch before launch")
         profile_id = state["profile_id"]
         if profile_id not in {"safe", "full-auto"}:
             fail("target profile is not supported by this build")
@@ -2302,14 +2423,14 @@ def launch_cline(target: Path, args: list[str]) -> int:
             profile_id=profile_id,
             command_permissions=state["command_permissions"],
         )
-    completed = subprocess.run(
-        [str(executable), *child_args],
-        cwd=os.getcwd(),
-        env=child_env,
-        check=False,
-        timeout=None,
-    )
-    return int(completed.returncode)
+        completed = subprocess.run(
+            [str(executable), *child_args],
+            cwd=os.getcwd(),
+            env=child_env,
+            check=False,
+            timeout=None,
+        )
+        return int(completed.returncode)
 
 
 def print_payload(payload: dict[str, Any], *, json_output: bool) -> None:

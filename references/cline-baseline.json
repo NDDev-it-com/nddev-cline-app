@@ -45,10 +45,7 @@
     "official_install_argv": ["npm", "install", "-g", "cline"],
     "managed_install_argv": [
       "npm",
-      "install",
-      "--global",
-      "--prefix",
-      "<stage-global>",
+      "ci",
       "--cache",
       "<stage-cache>",
       "--userconfig",
@@ -59,11 +56,12 @@
       "https://registry.npmjs.org/",
       "--fund=false",
       "--audit=false",
-      "--ignore-scripts=false",
-      "cline@3.0.46"
+      "--ignore-scripts=false"
     ],
     "registry": "https://registry.npmjs.org/",
-    "prefix_policy": "target-owned staged global prefix only"
+    "install_project_policy": "target-owned staged npm ci project only",
+    "lockfile": "software/cline-cli/package-lock.json",
+    "lockfile_sha256": "6edd73e2f6de4d8988431069696bf4318cd950ed3439b42b2baa4497b0874bdb"
   },
   "extension": {
     "publisher": "saoudrizwan",
@@ -124,6 +122,8 @@
     "https://raw.githubusercontent.com/cline/cline/main/sdk/packages/core/src/hooks/hook-file-hooks.ts",
     "https://github.com/cline/cline/releases/tag/v4.0.11",
     "https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev",
+    "https://docs.npmjs.com/cli/v11/commands/npm-ci/",
+    "https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/",
     "https://registry.npmjs.org/cline",
     "https://registry.npmjs.org/cline/latest"
   ]

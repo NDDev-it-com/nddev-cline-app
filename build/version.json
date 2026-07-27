@@ -10,10 +10,11 @@
   "cline_cli_package": "cline",
   "cline_cli_integrity": "sha512-U6uH3sLVvqx4fP65ejHkswhk3WvYOM2LCbQBX77Z7Tha4EX35vo2XZ51F6WnIiKlCAYZJ+YAEou2Yha/EAk+2A==",
   "cline_cli_shasum": "5b731496d251f76448fe676edbf4fde415b58881",
-  "cline_cli_install_method": "target-owned npm global prefix",
+  "cline_cli_install_method": "target-owned npm ci from committed package-lock",
+  "cline_cli_lockfile_sha256": "6edd73e2f6de4d8988431069696bf4318cd950ed3439b42b2baa4497b0874bdb",
   "node_minimum_major": 20,
   "node_recommended_major": 22,
-  "npm_global_prefix_install_env": [
+  "npm_ci_lockfile_install_env": [
     "HOME",
     "USERPROFILE",
     "TMPDIR",
@@ -22,7 +23,6 @@
     "XDG_STATE_HOME",
     "NPM_CONFIG_USERCONFIG",
     "NPM_CONFIG_GLOBALCONFIG",
-    "NPM_CONFIG_PREFIX",
     "NPM_CONFIG_CACHE",
     "NPM_CONFIG_REGISTRY"
   ],
