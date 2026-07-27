@@ -28,5 +28,5 @@ jobs:
         SECURITY.md .gds/repository.yaml .github build cli-tools config plugins
         profiles references setups software
       runtime_paths: >-
-        README.md LICENSE VERSION build cli-tools config plugins profiles
-        references setups software
+        AGENTS.md .claude/CLAUDE.md README.md LICENSE VERSION build cli-tools
+        config plugins profiles references setups software

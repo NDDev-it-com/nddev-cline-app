@@ -57,6 +57,8 @@ RELEASE_ARCHIVE_PATHS = [
     "software",
 ]
 RELEASE_RUNTIME_PATHS = [
+    "AGENTS.md",
+    ".claude/CLAUDE.md",
     "README.md",
     "LICENSE",
     "VERSION",
@@ -94,6 +96,13 @@ REQUIRED_CONTRACT_ROOTS = {
 REQUIRED_GOVERNANCE_ARCHIVE_PATHS = {
     "AGENTS.md",
     ".claude/CLAUDE.md",
+    ".gds/repository.yaml",
+}
+REQUIRED_RUNTIME_INSTRUCTION_PATHS = {
+    "AGENTS.md",
+    ".claude/CLAUDE.md",
+}
+REQUIRED_SOURCE_ONLY_GOVERNANCE_PATHS = {
     ".gds/repository.yaml",
 }
 PRIVATE_PATH_MARKERS = (
@@ -1634,8 +1643,13 @@ def validate_release_workflow(errors: list[str]) -> None:
         errors,
     )
     require(
-        REQUIRED_GOVERNANCE_ARCHIVE_PATHS.isdisjoint(set(runtime_paths)),
-        "runtime paths must not include governance-only source roots",
+        REQUIRED_RUNTIME_INSTRUCTION_PATHS.issubset(set(runtime_paths)),
+        "runtime paths missing instruction roots",
+        errors,
+    )
+    require(
+        REQUIRED_SOURCE_ONLY_GOVERNANCE_PATHS.isdisjoint(set(runtime_paths)),
+        "runtime paths must not include source-only governance roots",
         errors,
     )
     for declared in [*archive_paths, *runtime_paths]:
@@ -1669,10 +1683,44 @@ def validate_release_workflow(errors: list[str]) -> None:
 
 
 def validate_claude_bridge(errors: list[str]) -> None:
+    claude_dir = ROOT / ".claude"
+    agents = ROOT / "AGENTS.md"
     bridge = ROOT / ".claude" / "CLAUDE.md"
+    try:
+        claude_info = claude_dir.lstat()
+    except FileNotFoundError:
+        require(False, ".claude directory must exist", errors)
+        claude_info = None
+    if claude_info is not None:
+        require(
+            stat.S_ISDIR(claude_info.st_mode) and not stat.S_ISLNK(claude_info.st_mode),
+            ".claude must be a real directory",
+            errors,
+        )
+        if stat.S_ISDIR(claude_info.st_mode) and not stat.S_ISLNK(claude_info.st_mode):
+            require(
+                sorted(path.name for path in claude_dir.iterdir()) == ["CLAUDE.md"],
+                ".claude must contain only CLAUDE.md",
+                errors,
+            )
+    try:
+        agents_info = agents.lstat()
+    except FileNotFoundError:
+        require(False, "AGENTS.md must exist for Claude bridge import", errors)
+    else:
+        require(
+            stat.S_ISREG(agents_info.st_mode) and not stat.S_ISLNK(agents_info.st_mode),
+            "AGENTS.md must be a real regular file",
+            errors,
+        )
     require(bridge.is_file(), ".claude/CLAUDE.md bridge must exist", errors)
     if bridge.exists():
-        validate_no_symlinks_under(bridge, ".claude/CLAUDE.md bridge", errors)
+        bridge_info = bridge.lstat()
+        require(
+            stat.S_ISREG(bridge_info.st_mode) and not stat.S_ISLNK(bridge_info.st_mode),
+            ".claude/CLAUDE.md bridge must be a regular non-symlink file",
+            errors,
+        )
         require(
             bridge.read_bytes() == b"@../AGENTS.md\n",
             ".claude/CLAUDE.md bridge must exactly import AGENTS.md",
