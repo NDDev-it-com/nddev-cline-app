@@ -68,7 +68,7 @@
     "cli_command": "cline",
     "extension_tested_version": "4.0.11",
     "vscode_extension_id": "saoudrizwan.claude-dev",
-    "supported_platforms": ["macos-arm64", "macos-x64", "ubuntu-linux-arm64", "ubuntu-linux-x64"],
+    "supported_platforms": ["macos-arm64", "macos-x64", "ubuntu-glibc-arm64", "ubuntu-glibc-x64"],
     "unsupported_platforms": ["windows"]
   },
   "software_lifecycle": {

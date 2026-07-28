@@ -104,7 +104,7 @@ and update-cli, are denied while target software is running.
 
 The launch handoff is a write-protected verified-path handoff. Mutating
 commands publish and lock a monotonic product `global.lock` under the fixed
-system temp root (`/private/tmp` on macOS, `/tmp` on Linux), canonicalize the
+system temp root (`/private/tmp` on macOS, `/tmp` on Ubuntu), canonicalize the
 target under that coordination, then publish and lock the canonical target
 anchor. Read-only `status`, `plan`, and `software-status` create no external
 anchors; they either inspect a cold no-anchor namespace or open existing

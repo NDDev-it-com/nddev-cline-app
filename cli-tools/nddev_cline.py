@@ -9,6 +9,7 @@ import errno
 import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -2388,9 +2389,47 @@ def cline_executable(target: Path) -> Path:
 
 
 def require_supported_runtime_platform() -> None:
-    if sys.platform.startswith(("darwin", "linux")):
-        return
-    fail(f"{PRODUCT_NAME} {VERSION} supports Cline CLI launch/install only on macOS and Linux")
+    current_product_host_id()
+
+
+def current_machine_arch() -> str:
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        return "arm64"
+    if machine in {"x86_64", "amd64"}:
+        return "x64"
+    fail(f"{PRODUCT_NAME} {VERSION} does not support this CPU architecture: {machine}")
+
+
+def current_linux_distribution() -> dict[str, str]:
+    data: dict[str, str] = {}
+    try:
+        content = Path("/etc/os-release").read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"{PRODUCT_NAME} {VERSION} requires Ubuntu on Linux; cannot read /etc/os-release: {exc}")
+    for line in content.splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        data[key] = value.strip().strip('"')
+    return data
+
+
+def current_product_host_id() -> str:
+    arch = current_machine_arch()
+    if sys.platform.startswith("darwin"):
+        return f"macos-{arch}"
+    if sys.platform.startswith("linux"):
+        distro = current_linux_distribution()
+        distro_id = distro.get("ID", "").lower()
+        id_like = {item.lower() for item in distro.get("ID_LIKE", "").split()}
+        if distro_id != "ubuntu" and "ubuntu" not in id_like:
+            fail(f"{PRODUCT_NAME} {VERSION} supports Cline CLI launch/install only on Ubuntu glibc hosts")
+        libc_name, _libc_version = platform.libc_ver()
+        if libc_name and libc_name.lower() != "glibc":
+            fail(f"{PRODUCT_NAME} {VERSION} supports Cline CLI launch/install only on Ubuntu glibc hosts")
+        return f"ubuntu-glibc-{arch}"
+    fail(f"{PRODUCT_NAME} {VERSION} supports Cline CLI launch/install only on macOS and Ubuntu glibc")
 
 
 def path_is_relative_to(path: Path, parent: Path) -> bool:
