@@ -86,6 +86,8 @@ cleanup journal until it is drained.
 `software-status` is read-only and validates the manifest and tree digest
 without executing the target binary. `status`, `plan`, and `software-status`
 also expose valid `cleanup_pending` state without repairing or deleting it.
+`launch` fails closed while cleanup is pending; run a mutating manager command
+to drain it before spawning Cline.
 
 Launch forwards stdio and the child exit code:
 

@@ -101,7 +101,7 @@ CLEANUP_PARENT_RELATIVE = MANAGER_CONTROL_RELATIVE / "cleanup"
 CLEANUP_TOMBSTONES_RELATIVE = CLEANUP_PARENT_RELATIVE / "tombstones"
 CLEANUP_PENDING_NAME = "pending.json"
 CLEANUP_INTENT_PREFIX = "intent-"
-CLEANUP_SCHEMA_VERSION = 1
+CLEANUP_SCHEMA_VERSION = 2
 CLEANUP_MAX_ENTRIES = 20000
 CLEANUP_JOURNAL_MAX_BYTES = 2 * 1024 * 1024
 SOFTWARE_REPLACE_PATHS = (
@@ -1707,13 +1707,13 @@ def read_existing_settings_if_managed(target: Path, state: dict[str, Any]) -> di
     )
 
 
-def current_managed_snapshot(target: Path, paths: tuple[Path, ...] = ALL_MANAGED_PATHS) -> dict[Path, bytes | None]:
-    snapshot: dict[Path, bytes | None] = {}
+def current_managed_snapshot(target: Path, paths: tuple[Path, ...] = ALL_MANAGED_PATHS) -> dict[Path, tuple[int, int] | None]:
+    snapshot: dict[Path, tuple[int, int] | None] = {}
     for relative in paths:
         path = target / relative
         if path.exists() or path.is_symlink():
-            content, _ = read_regular_file(path, f"managed file {relative}", owner_only=True)
-            snapshot[relative] = content
+            info = require_regular_file(path, f"managed file {relative}", owner_only=True)
+            snapshot[relative] = identity_of(info)
         else:
             snapshot[relative] = None
     return snapshot
@@ -1734,18 +1734,9 @@ def prune_empty_managed_dirs(target: Path, paths: tuple[Path, ...] = ALL_MANAGED
             directory = directory.parent
 
 
-def restore_snapshot(target: Path, snapshot: dict[Path, bytes | None]) -> None:
-    for relative in sorted(snapshot, key=lambda item: len(item.parts), reverse=True):
-        path = target / relative
-        if path.exists() or path.is_symlink():
-            path.unlink()
-    for relative, content in snapshot.items():
-        if content is None:
-            continue
-        path = ensure_private_parent(target, relative)
-        path.write_bytes(content)
-        path.chmod(OWNER_FILE_MODE)
-    prune_empty_managed_dirs(target, tuple(snapshot))
+def restore_snapshot(target: Path, snapshot: dict[Path, tuple[int, int] | None]) -> None:
+    del target, snapshot
+    fail("managed rollback requires held original objects and must not recreate files from bytes")
 
 
 def replace_managed_state(
@@ -1792,6 +1783,11 @@ def replace_managed_state(
             installed_new.append(relative)
             sync_directory(destination.parent, f"managed file {relative} parent")
         prune_empty_managed_dirs(target, tuple(desired))
+        cleanup_created = publish_cleanup_pending_for_paths(
+            target,
+            [hold_root],
+            reason="managed-replacement",
+        )
     except BaseException:
         for relative in reversed(installed_new):
             destination = target / relative
@@ -1809,11 +1805,6 @@ def replace_managed_state(
         with contextlib.suppress(OSError):
             cleanup_path(transaction_root)
         raise
-    cleanup_created = publish_cleanup_pending_for_paths(
-        target,
-        [hold_root],
-        reason="managed-replacement",
-    )
     with contextlib.suppress(OSError):
         cleanup_path(stage_root)
     with contextlib.suppress(OSError):
@@ -2116,6 +2107,25 @@ def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[Path, byt
     return envelope, files
 
 
+def backup_pool_present(target: Path) -> bool:
+    return path_present(backup_pool(target)) or path_present(legacy_backup_pool(target))
+
+
+def rollback_created_backup_pool(
+    target: Path,
+    *,
+    existed_before: bool,
+    target_metadata: dict[str, Any] | None,
+) -> None:
+    if existed_before:
+        return
+    pool = backup_pool(target)
+    if path_present(pool):
+        remove_tree_no_follow(pool)
+        sync_directory(target, "backup rollback target")
+    restore_directory_metadata(target, target_metadata)
+
+
 def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -> dict[str, Any]:
     with locked_new_or_existing_target_with_creation(
         target
@@ -2136,7 +2146,8 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
         desired[Path(STAMP_NAME)] = canonical_json(stamp)
         changed = changed_paths(canonical_target, desired)
         backup_slot: int | None = None
-        snapshot = current_managed_snapshot(canonical_target)
+        backup_existed = backup_pool_present(canonical_target)
+        backup_target_metadata = directory_metadata(canonical_target) if changed else None
         cleanup_pending = False
         try:
             if state["state"] == "managed" and changed:
@@ -2145,7 +2156,11 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
                 cleanup_pending = replace_managed_state(canonical_target, desired, state)
             post = inspect_target(canonical_target)
         except BaseException:
-            restore_snapshot(canonical_target, snapshot)
+            rollback_created_backup_pool(
+                canonical_target,
+                existed_before=backup_existed,
+                target_metadata=backup_target_metadata,
+            )
             if created_target:
                 remove_created_target_tree(canonical_target, parent_snapshot)
             raise
@@ -2223,14 +2238,19 @@ def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any
             if relative != Path(STAMP_NAME) and relative not in desired:
                 desired[relative] = None
         changed = changed_paths(canonical_target, desired)
-        snapshot = current_managed_snapshot(canonical_target)
+        backup_existed = backup_pool_present(canonical_target)
+        backup_target_metadata = directory_metadata(canonical_target)
         cleanup_pending = False
         try:
             backup_slot = create_backup(canonical_target, state)
             cleanup_pending = replace_managed_state(canonical_target, desired, state)
             post = inspect_target(canonical_target)
         except BaseException:
-            restore_snapshot(canonical_target, snapshot)
+            rollback_created_backup_pool(
+                canonical_target,
+                existed_before=backup_existed,
+                target_metadata=backup_target_metadata,
+            )
             raise
     return {
         "ok": True,
@@ -2253,15 +2273,20 @@ def remove_setup(target: Path) -> dict[str, Any]:
         state = inspect_target(canonical_target)
         if state["state"] not in {"managed", "legacy-managed"}:
             fail("target is not managed by nddev-cline-app")
-        snapshot = current_managed_snapshot(canonical_target)
         state_paths = tuple(Path(raw) for raw in [*state["managed_files"], STAMP_NAME])
         desired = {relative: None for relative in state_paths}
+        backup_existed = backup_pool_present(canonical_target)
+        backup_target_metadata = directory_metadata(canonical_target)
         cleanup_pending = False
         try:
             backup_slot = create_backup(canonical_target, state)
             cleanup_pending = replace_managed_state(canonical_target, desired, state)
         except BaseException:
-            restore_snapshot(canonical_target, snapshot)
+            rollback_created_backup_pool(
+                canonical_target,
+                existed_before=backup_existed,
+                target_metadata=backup_target_metadata,
+            )
             raise
     return {
         "ok": True,
@@ -2285,13 +2310,11 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
             relative = Path(raw_relative)
             if relative not in desired:
                 desired[relative] = None
-        snapshot = current_managed_snapshot(canonical_target)
         cleanup_pending = False
         try:
             cleanup_pending = replace_managed_state(canonical_target, desired, state)
             post = inspect_target(canonical_target)
         except BaseException:
-            restore_snapshot(canonical_target, snapshot)
             raise
     return {
         "ok": True,
@@ -2961,6 +2984,195 @@ def cleanup_entry_snapshot(root: Path) -> list[dict[str, Any]]:
     return entries
 
 
+def validate_cleanup_snapshot_schema(snapshot: Any, label: str) -> list[dict[str, Any]]:
+    if not isinstance(snapshot, list) or not snapshot:
+        fail(f"{label} snapshot is invalid")
+    if len(snapshot) > CLEANUP_MAX_ENTRIES:
+        fail(f"{label} snapshot exceeds the entry bound")
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for record in snapshot:
+        if not isinstance(record, dict):
+            fail(f"{label} snapshot entry must be an object")
+        kind = record.get("kind")
+        expected_keys = {
+            "relative",
+            "kind",
+            "mode",
+            "uid",
+            "nlink",
+            "dev",
+            "ino",
+            "size",
+            "mtime_ns",
+        }
+        if kind == "file":
+            expected_keys.add("sha256")
+        require_exact_keys(record, expected_keys, f"{label} snapshot entry")
+        relative = record["relative"]
+        if not isinstance(relative, str) or relative in seen:
+            fail(f"{label} snapshot relative path is invalid")
+        if relative != ".":
+            relative_path = Path(relative)
+            if relative_path.is_absolute() or ".." in relative_path.parts or relative_path == Path("."):
+                fail(f"{label} snapshot relative path is unsafe")
+        seen.add(relative)
+        if kind not in {"directory", "file"}:
+            fail(f"{label} snapshot kind is invalid")
+        for key in ("mode", "uid", "nlink", "dev", "ino", "size", "mtime_ns"):
+            if not isinstance(record[key], int) or record[key] < 0:
+                fail(f"{label} snapshot {key} is invalid")
+        if kind == "file":
+            if record["nlink"] != 1:
+                fail(f"{label} snapshot file must not have hard-link aliases")
+            if not isinstance(record["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", record["sha256"]):
+                fail(f"{label} snapshot digest is invalid")
+        result.append(record)
+    if "." not in seen:
+        fail(f"{label} snapshot root entry is missing")
+    return result
+
+
+def cleanup_snapshot_map(snapshot: list[dict[str, Any]], label: str) -> dict[str, dict[str, Any]]:
+    records = validate_cleanup_snapshot_schema(snapshot, label)
+    return {str(record["relative"]): record for record in records}
+
+
+def cleanup_source_allowed(relative: Path) -> bool:
+    if relative.is_absolute() or ".." in relative.parts or relative == Path("."):
+        return False
+    parts = relative.parts
+    if parts[:2] == (".nddev-cline-control", "managed-transactions"):
+        return True
+    if parts[:2] == (".nddev-cline-control", "software-transactions"):
+        return True
+    if len(parts) == 2 and parts[0] == ".nddev-cline-backups" and parts[1].isdigit():
+        slot = int(parts[1])
+        return 0 <= slot <= 9
+    return False
+
+
+def validate_cleanup_record(
+    path: Path,
+    record: dict[str, Any],
+    label: str,
+    *,
+    strict_directory_metadata: bool,
+) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail(f"{label} is missing")
+    if stat.S_ISLNK(info.st_mode):
+        fail(f"{label} must not be a symlink")
+    kind = record["kind"]
+    if kind == "file":
+        if not stat.S_ISREG(info.st_mode):
+            fail(f"{label} kind changed")
+        if info.st_nlink != 1:
+            fail(f"{label} must not have hard-link aliases")
+        content, _ = read_regular_file(path, label)
+        observed: dict[str, Any] = {
+            "kind": "file",
+            "mode": stat.S_IMODE(info.st_mode),
+            "uid": owner_of(info),
+            "nlink": info.st_nlink,
+            "dev": info.st_dev,
+            "ino": info.st_ino,
+            "size": info.st_size,
+            "mtime_ns": info.st_mtime_ns,
+            "sha256": sha256_bytes(content),
+        }
+    elif kind == "directory":
+        if not stat.S_ISDIR(info.st_mode):
+            fail(f"{label} kind changed")
+        observed = {
+            "kind": "directory",
+            "mode": stat.S_IMODE(info.st_mode),
+            "uid": owner_of(info),
+            "dev": info.st_dev,
+            "ino": info.st_ino,
+        }
+        if strict_directory_metadata:
+            observed.update(
+                {
+                    "nlink": info.st_nlink,
+                    "size": info.st_size,
+                    "mtime_ns": info.st_mtime_ns,
+                }
+            )
+    else:
+        fail(f"{label} snapshot kind is invalid")
+    for key, value in observed.items():
+        if record[key] != value:
+            fail(f"{label} identity changed")
+
+
+def validate_cleanup_tree_against_snapshot(
+    root: Path,
+    snapshot: list[dict[str, Any]],
+    label: str,
+    *,
+    allow_missing: bool,
+    strict_directory_metadata: bool,
+) -> None:
+    records = cleanup_snapshot_map(snapshot, label)
+    if not path_present(root):
+        if allow_missing:
+            return
+        fail(f"{label} is missing")
+    observed: set[str] = set()
+    paths = [root]
+    if root.is_dir() and not root.is_symlink():
+        paths.extend(sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root))))
+    for path in paths:
+        relative = "." if path == root else str(path.relative_to(root))
+        if relative not in records:
+            fail(f"{label} contains an undeclared path")
+        observed.add(relative)
+        validate_cleanup_record(
+            path,
+            records[relative],
+            f"{label} object {relative}",
+            strict_directory_metadata=strict_directory_metadata,
+        )
+    if not allow_missing and observed != set(records):
+        fail(f"{label} is incomplete")
+
+
+def remove_cleanup_tree_from_snapshot(root: Path, snapshot: list[dict[str, Any]], label: str) -> None:
+    records = cleanup_snapshot_map(snapshot, label)
+    validate_cleanup_tree_against_snapshot(
+        root,
+        snapshot,
+        label,
+        allow_missing=True,
+        strict_directory_metadata=False,
+    )
+    for relative in sorted(records, key=lambda item: len(Path(item).parts), reverse=True):
+        path = root if relative == "." else root / relative
+        if not path_present(path):
+            continue
+        record = records[relative]
+        validate_cleanup_record(
+            path,
+            record,
+            f"{label} object {relative}",
+            strict_directory_metadata=False,
+        )
+        if record["kind"] == "file":
+            path.unlink()
+        elif record["kind"] == "directory":
+            undeclared = [
+                child.name
+                for child in path.iterdir()
+                if str(child.relative_to(root)) not in records
+            ]
+            if undeclared:
+                fail(f"{label} directory contains an undeclared child")
+            path.rmdir()
+
+
 def cleanup_journal_payload(
     target: Path,
     *,
@@ -3008,9 +3220,10 @@ def validate_cleanup_journal(target: Path, journal: dict[str, Any], label: str) 
     for entry in entries:
         if not isinstance(entry, dict):
             fail(f"{label} entry must be an object")
-        require_exact_keys(entry, {"name", "source", "snapshot"}, f"{label} entry")
+        require_exact_keys(entry, {"name", "source", "destination", "snapshot"}, f"{label} entry")
         name = entry["name"]
         source = entry["source"]
+        destination = entry["destination"]
         snapshot = entry["snapshot"]
         if (
             not isinstance(name, str)
@@ -3020,10 +3233,12 @@ def validate_cleanup_journal(target: Path, journal: dict[str, Any], label: str) 
             fail(f"{label} tombstone name is invalid")
         seen.add(name)
         relative = Path(str(source))
-        if relative.is_absolute() or ".." in relative.parts or relative == Path("."):
+        if not cleanup_source_allowed(relative):
             fail(f"{label} source path is unsafe")
-        if not isinstance(snapshot, list) or not snapshot:
-            fail(f"{label} snapshot is invalid")
+        destination_relative = Path(str(destination))
+        if destination_relative != CLEANUP_TOMBSTONES_RELATIVE / name:
+            fail(f"{label} destination path is invalid")
+        validate_cleanup_snapshot_schema(snapshot, f"{label} entry {name}")
     return entries
 
 
@@ -3033,15 +3248,19 @@ def load_cleanup_pending(target: Path, *, read_only: bool) -> dict[str, Any] | N
         return None
     require_private_directory(parent, "cleanup parent")
     allowed = {CLEANUP_PENDING_NAME, "tombstones"}
+    intent_paths: list[Path] = []
     for child in parent.iterdir():
         if child.name.startswith(CLEANUP_INTENT_PREFIX):
-            fail("cleanup recovery intent exists; run a mutating command to recover")
+            intent_paths.append(child)
+            continue
         if child.name.startswith(f".{CLEANUP_PENDING_NAME}.publish-"):
             fail("cleanup journal publication is incomplete")
-        if child.name not in allowed and not child.name.startswith(CLEANUP_INTENT_PREFIX):
+        if child.name not in allowed:
             fail("cleanup parent contains an unmanaged path")
     pending = cleanup_pending_path(target)
     if not path_present(pending):
+        if intent_paths:
+            fail("cleanup recovery intent exists; run a mutating command to recover")
         tombstones = cleanup_tombstones(target)
         if path_present(tombstones) and any(tombstones.iterdir()):
             fail("cleanup tombstones exist without a pending journal")
@@ -3055,8 +3274,25 @@ def load_cleanup_pending(target: Path, *, read_only: bool) -> dict[str, Any] | N
     require_private_directory(tombstones, "cleanup tombstone parent")
     expected_names = sorted(str(entry["name"]) for entry in entries)
     actual_names = sorted(child.name for child in tombstones.iterdir())
-    if actual_names != expected_names:
+    if any(name not in expected_names for name in actual_names):
         fail("cleanup tombstone set does not match the pending journal")
+    for entry in entries:
+        if path_present(target / Path(str(entry["source"]))):
+            fail("cleanup pending journal still has a live source path")
+        tombstone = target / Path(str(entry["destination"]))
+        if path_present(tombstone):
+            validate_cleanup_tree_against_snapshot(
+                tombstone,
+                entry["snapshot"],
+                "cleanup pending tombstone",
+                allow_missing=True,
+                strict_directory_metadata=False,
+            )
+    for intent_path in intent_paths:
+        intent = load_cleanup_intent(target, intent_path)
+        intent_entries = validate_cleanup_journal(target, intent, "cleanup recovery intent")
+        if intent["reason"] != journal["reason"] or intent_entries != entries:
+            fail("cleanup recovery intent does not match the pending journal")
     return journal
 
 
@@ -3071,54 +3307,83 @@ def cleanup_pending_metadata(target: Path) -> dict[str, Any]:
     }
 
 
+def load_cleanup_intent(target: Path, intent_path: Path) -> dict[str, Any]:
+    intent = load_json_object(intent_path, "cleanup recovery intent", owner_only=True)
+    validate_cleanup_journal(target, intent, "cleanup recovery intent")
+    return intent
+
+
+def recover_cleanup_pending_publication_alias(target: Path) -> bool:
+    pending = cleanup_pending_path(target)
+    if not path_present(pending):
+        return False
+    info = require_regular_file(pending, "cleanup pending journal", owner_only=True)
+    if info.st_nlink == 1:
+        return False
+    if info.st_nlink != 2:
+        fail("cleanup pending journal publication is incomplete")
+    parent = pending.parent
+    aliases: list[Path] = []
+    for child in parent.iterdir():
+        if not child.name.startswith(f".{CLEANUP_PENDING_NAME}.publish-"):
+            continue
+        child_info = child.lstat()
+        if stat.S_ISREG(child_info.st_mode) and identity_of(child_info) == identity_of(info):
+            aliases.append(child)
+        else:
+            fail("cleanup journal has an unknown publication alias")
+    if len(aliases) != 1:
+        fail("cleanup journal publication is incomplete")
+    aliases[0].unlink()
+    sync_directory(parent, "cleanup parent")
+    require_regular_file(pending, "cleanup pending journal", owner_only=True)
+    return True
+
+
 def recover_cleanup_intents(target: Path) -> bool:
     recovered = False
     for intent_path in cleanup_intent_paths(target):
-        intent = load_json_object(intent_path, "cleanup recovery intent", owner_only=True)
-        require_exact_keys(
-            intent,
-            {
-                "schema_version",
-                "product_name",
-                "canonical_target",
-                "cleanup_parent",
-                "moves",
-            },
-            "cleanup recovery intent",
-        )
-        if (
-            intent["schema_version"] != CLEANUP_SCHEMA_VERSION
-            or intent["product_name"] != PRODUCT_NAME
-            or intent["canonical_target"] != str(target)
-            or intent["cleanup_parent"] != str(CLEANUP_PARENT_RELATIVE)
-        ):
-            fail("cleanup recovery intent is not bound to this target")
-        moves = intent["moves"]
-        if not isinstance(moves, list) or len(moves) > CLEANUP_MAX_ENTRIES:
-            fail("cleanup recovery intent moves are invalid")
-        for move in reversed(moves):
-            if not isinstance(move, dict):
-                fail("cleanup recovery intent move must be an object")
-            require_exact_keys(move, {"source", "name"}, "cleanup recovery intent move")
-            source_relative = Path(str(move["source"]))
-            if source_relative.is_absolute() or ".." in source_relative.parts:
-                fail("cleanup recovery intent source is unsafe")
-            name = str(move["name"])
-            if not re.fullmatch(r"tombstone-[a-f0-9]{16}", name):
-                fail("cleanup recovery intent tombstone name is invalid")
+        intent = load_cleanup_intent(target, intent_path)
+        pending = cleanup_pending_path(target)
+        if path_present(pending):
+            journal = load_cleanup_pending(target, read_only=False)
+            if journal is None or journal["entries"] != intent["entries"]:
+                fail("cleanup recovery intent does not match the pending journal")
+            intent_path.unlink()
+            sync_directory(intent_path.parent, "cleanup parent")
+            recovered = True
+            continue
+        for entry in reversed(intent["entries"]):
+            source_relative = Path(str(entry["source"]))
             source = target / source_relative
-            tombstone = cleanup_tombstones(target) / name
+            tombstone = target / Path(str(entry["destination"]))
+            snapshot = entry["snapshot"]
             source_exists = path_present(source)
             tombstone_exists = path_present(tombstone)
             if source_exists and tombstone_exists:
                 fail("cleanup recovery intent has both source and tombstone present")
             if not source_exists and tombstone_exists:
+                validate_cleanup_tree_against_snapshot(
+                    tombstone,
+                    snapshot,
+                    "cleanup recovery tombstone",
+                    allow_missing=False,
+                    strict_directory_metadata=True,
+                )
                 source.parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
                 os.replace(tombstone, source)
                 sync_directory(source.parent, "cleanup recovery source parent")
                 sync_directory(tombstone.parent, "cleanup recovery tombstone parent")
                 recovered = True
-            elif not source_exists and not tombstone_exists:
+            elif source_exists:
+                validate_cleanup_tree_against_snapshot(
+                    source,
+                    snapshot,
+                    "cleanup recovery source",
+                    allow_missing=False,
+                    strict_directory_metadata=True,
+                )
+            else:
                 fail("cleanup recovery intent lost both source and tombstone")
         intent_path.unlink()
         sync_directory(intent_path.parent, "cleanup parent")
@@ -3133,8 +3398,9 @@ def recover_cleanup_intents(target: Path) -> bool:
 
 def drain_or_recover_cleanup_before_mutation(target: Path) -> bool:
     recovered = recover_cleanup_intents(target)
+    alias_recovered = recover_cleanup_pending_publication_alias(target)
     drained = drain_cleanup_pending(target)
-    return recovered or drained
+    return recovered or alias_recovered or drained
 
 
 def remove_tree_no_follow(path: Path) -> None:
@@ -3159,9 +3425,13 @@ def drain_cleanup_pending(target: Path) -> bool:
         return False
     entries = validate_cleanup_journal(target, journal, "cleanup pending journal")
     for entry in entries:
-        tombstone = cleanup_tombstones(target) / str(entry["name"])
+        tombstone = target / Path(str(entry["destination"]))
         if path_present(tombstone):
-            remove_tree_no_follow(tombstone)
+            remove_cleanup_tree_from_snapshot(
+                tombstone,
+                entry["snapshot"],
+                f"cleanup tombstone {entry['name']}",
+            )
             sync_directory(tombstone.parent, "cleanup tombstone parent")
     pending = cleanup_pending_path(target)
     pending.unlink()
@@ -3188,52 +3458,75 @@ def publish_cleanup_pending_for_paths(target: Path, sources: list[Path], *, reas
         fail("cleanup pending state already exists")
     if cleanup_intent_paths(target):
         fail("cleanup recovery intent already exists")
-    moves: list[dict[str, str]] = []
+    entries: list[dict[str, Any]] = []
     for index, source in enumerate(existing):
         source_relative = relative_under(source, target, "cleanup source")
+        if not cleanup_source_allowed(source_relative):
+            fail("cleanup source path is not allowlisted for this operation")
         name_seed = f"{time.time_ns()}-{os.getpid()}-{index}-{source_relative}"
         tombstone_name = f"tombstone-{hashlib.sha256(name_seed.encode('utf-8')).hexdigest()[:16]}"
-        moves.append({"source": str(source_relative), "name": tombstone_name})
-    intent = {
-        "schema_version": CLEANUP_SCHEMA_VERSION,
-        "product_name": PRODUCT_NAME,
-        "canonical_target": str(target),
-        "cleanup_parent": str(CLEANUP_PARENT_RELATIVE),
-        "moves": moves,
-    }
+        destination = CLEANUP_TOMBSTONES_RELATIVE / tombstone_name
+        snapshot = cleanup_entry_snapshot(source)
+        entries.append(
+            {
+                "name": tombstone_name,
+                "source": str(source_relative),
+                "destination": str(destination),
+                "snapshot": snapshot,
+            }
+        )
+    intent = cleanup_journal_payload(target, reason=reason, entries=entries)
+    validate_cleanup_journal(target, intent, "cleanup recovery intent")
     intent_path = parent / f"{CLEANUP_INTENT_PREFIX}{os.getpid()}-{time.time_ns()}.json"
     publish_regular_file_no_replace(
         intent_path,
         canonical_json(intent),
         "cleanup recovery intent",
     )
-    journal_entries: list[dict[str, Any]] = []
-    for move in moves:
-        source = target / move["source"]
-        tombstone = tombstones / move["name"]
+    for entry in entries:
+        source = target / Path(str(entry["source"]))
+        tombstone = target / Path(str(entry["destination"]))
         tombstone.parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+        if path_present(tombstone):
+            fail("cleanup tombstone destination already exists")
+        validate_cleanup_tree_against_snapshot(
+            source,
+            entry["snapshot"],
+            "cleanup source before retirement",
+            allow_missing=False,
+            strict_directory_metadata=True,
+        )
         os.replace(source, tombstone)
         sync_directory(source.parent, "cleanup source parent")
         sync_directory(tombstone.parent, "cleanup tombstone parent")
-        journal_entries.append(
-            {
-                "name": move["name"],
-                "source": move["source"],
-                "snapshot": cleanup_entry_snapshot(tombstone),
-            }
+        validate_cleanup_tree_against_snapshot(
+            tombstone,
+            entry["snapshot"],
+            "cleanup tombstone after retirement",
+            allow_missing=False,
+            strict_directory_metadata=True,
         )
-    journal = cleanup_journal_payload(target, reason=reason, entries=journal_entries)
+    journal = cleanup_journal_payload(target, reason=reason, entries=entries)
     journal_content = canonical_json(journal)
     validate_cleanup_journal(
         target,
         parse_json_object(journal_content, "cleanup pending journal"),
         "cleanup pending journal",
     )
-    publish_regular_file_no_replace(
-        cleanup_pending_path(target),
-        journal_content,
-        "cleanup pending journal",
-    )
+    try:
+        publish_regular_file_no_replace(
+            cleanup_pending_path(target),
+            journal_content,
+            "cleanup pending journal",
+        )
+    except BaseException:
+        if path_present(cleanup_pending_path(target)):
+            recover_cleanup_pending_publication_alias(target)
+            loaded = load_cleanup_pending(target, read_only=False)
+            if loaded == journal:
+                return True
+        recover_cleanup_intents(target)
+        raise
     intent_path.unlink()
     sync_directory(parent, "cleanup parent")
     loaded = load_cleanup_pending(target, read_only=False)
@@ -3603,6 +3896,7 @@ def replace_software_state(target: Path, live_stage: Path, hold_parent: Path) ->
     }
     moved_old: list[Path] = []
     installed_new: list[Path] = []
+    cleanup_pending = False
     try:
         for relative in SOFTWARE_REPLACE_PATHS:
             destination = target / relative
@@ -3616,6 +3910,19 @@ def replace_software_state(target: Path, live_stage: Path, hold_parent: Path) ->
         status = software_status(target)
         if not status["installed"] or not status["current"]:
             fail("installed Cline CLI did not validate as the tested version")
+        cleanup_created = publish_cleanup_pending_for_paths(
+            target,
+            [hold],
+            reason="software-replacement",
+        )
+        if cleanup_created:
+            try:
+                drain_cleanup_pending(target)
+            except Exception:
+                cleanup_pending = True
+        else:
+            with contextlib.suppress(OSError):
+                cleanup_path(hold)
     except BaseException:
         moved_old = [
             relative
@@ -3640,20 +3947,6 @@ def replace_software_state(target: Path, live_stage: Path, hold_parent: Path) ->
                 if path_present(directory) and directory.is_dir() and not directory.is_symlink():
                     directory.rmdir()
         raise
-    cleanup_pending = False
-    cleanup_created = publish_cleanup_pending_for_paths(
-        target,
-        [hold],
-        reason="software-replacement",
-    )
-    if cleanup_created:
-        try:
-            drain_cleanup_pending(target)
-        except Exception:
-            cleanup_pending = True
-    else:
-        with contextlib.suppress(OSError):
-            cleanup_path(hold)
     return cleanup_pending
 
 
@@ -3911,6 +4204,8 @@ def launch_cline(target: Path, args: list[str]) -> int:
         state = inspect_target(canonical_target)
         if state["state"] != "managed":
             fail("target is not managed by nddev-cline-app")
+        if state.get("cleanup_pending"):
+            fail("target cleanup is pending; run a mutating command before launch")
         if state.get("needs_update"):
             fail("target setup was written by a prior build; run install or switch before launch")
         profile_id = state["profile_id"]

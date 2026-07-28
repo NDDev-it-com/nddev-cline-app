@@ -684,8 +684,13 @@ def validate_runtime_contract(errors: list[str]) -> None:
             require("renames the internal lock directory" in lock_policy, "launch policy must cover internal lock directory rename", errors)
             require("bootstrap lock root" in lock_policy, "launch policy must disclose bootstrap root same-UID boundary", errors)
             require("target root, HOME, config, TMP, XDG, runtime, and sandbox directories remain writable" in lock_policy, "launch policy must preserve runtime writability", errors)
-        require("--data-dir" not in launch.get("full_auto_command", ""), "full-auto command must not include --data-dir", errors)
-        require("CLINE_SANDBOX" not in launch.get("full_auto_command", ""), "full-auto command must not set sandbox env", errors)
+            require("--data-dir" not in launch.get("full_auto_command", ""), "full-auto command must not include --data-dir", errors)
+            require("CLINE_SANDBOX" not in launch.get("full_auto_command", ""), "full-auto command must not set sandbox env", errors)
+            require(
+                "cleanup is pending" in (ROOT / "cli-tools" / "nddev_cline.py").read_text(encoding="utf-8"),
+                "launch must fail closed while cleanup is pending",
+                errors,
+            )
     if isinstance(software, dict):
         cli = software.get("cli")
         extension = software.get("extension")
@@ -737,6 +742,20 @@ def validate_runtime_contract(errors: list[str]) -> None:
             require(cli.get("layout", {}).get("package_wrapper") == str(nddev_cline.PACKAGE_WRAPPER_RELATIVE), "package wrapper path mismatch", errors)
             require(cli.get("version_probe", {}).get("timeout_seconds") == nddev_cline.VERSION_PROBE_TIMEOUT_SECONDS, "version probe timeout mismatch", errors)
     lifecycle = manifest.get("software_lifecycle")
+    if isinstance(transaction, dict):
+        require(
+            transaction.get("cleanup_journal_schema") == nddev_cline.CLEANUP_SCHEMA_VERSION,
+            "contract cleanup journal schema mismatch",
+            errors,
+        )
+        cleanup_policy = transaction.get("cleanup_pending")
+        require(
+            isinstance(cleanup_policy, str)
+            and "read-only commands expose valid pending state without repair" in cleanup_policy
+            and "launch fails closed" in cleanup_policy,
+            "contract cleanup pending policy mismatch",
+            errors,
+        )
     require(isinstance(lifecycle, dict), "manifest software_lifecycle missing", errors)
     if isinstance(lifecycle, dict):
         require(lifecycle.get("install_argv", [None])[0:2] == ["npm", "ci"], "manifest install argv must use npm ci", errors)
@@ -750,6 +769,19 @@ def validate_runtime_contract(errors: list[str]) -> None:
                 require(flag not in install_argv, f"manifest install argv must not contain {flag}", errors)
         require(lifecycle.get("lifecycle_scripts") == "disabled", "manifest lifecycle script policy mismatch", errors)
         require(lifecycle.get("bin_links") == "disabled", "manifest bin-links policy mismatch", errors)
+        require(
+            lifecycle.get("cleanup_journal_schema") == nddev_cline.CLEANUP_SCHEMA_VERSION,
+            "manifest cleanup journal schema mismatch",
+            errors,
+        )
+        cleanup_policy = lifecycle.get("cleanup_pending")
+        require(
+            isinstance(cleanup_policy, str)
+            and "launch fails closed" in cleanup_policy
+            and "drains it before active changes" in cleanup_policy,
+            "manifest cleanup pending policy mismatch",
+            errors,
+        )
         expected_node_preflight = (
             f"Node.js {nddev_cline.MIN_NODE_MAJOR}+ required; "
             f"{nddev_cline.RECOMMENDED_NODE_MAJOR} recommended"
