@@ -3591,6 +3591,15 @@ def replace_software_state(target: Path, live_stage: Path, hold_parent: Path) ->
             installed_new=installed_new,
             preexisting_parent_paths=preexisting_parent_paths,
         )
+        with contextlib.suppress(OSError):
+            cleanup_path(hold)
+        for directory in (
+            target / MANAGER_CONTROL_RELATIVE / "software-transactions",
+            target / MANAGER_CONTROL_RELATIVE,
+        ):
+            with contextlib.suppress(OSError):
+                if path_present(directory) and directory.is_dir() and not directory.is_symlink():
+                    directory.rmdir()
         raise
     cleanup_pending = False
     cleanup_created = publish_cleanup_pending_for_paths(
