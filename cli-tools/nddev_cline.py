@@ -39,6 +39,7 @@ BACKUP_NAME = "NDDEV-CLINE-BACKUP.json"
 LOCK_DIRECTORY_NAME = ".nddev-cline-lock"
 LOCK_FILE_NAME = "lock"
 BOOTSTRAP_LOCK_POOL_NAME = ".nddev-cline-lifecycle-locks"
+PRODUCT_LOCK_NAME = "global.lock"
 BOOTSTRAP_LOCK_SUFFIX = ".lock"
 BASELINE_REF = ROOT / "references" / "cline-baseline.json"
 INSTALL_LOCK_ROOT = ROOT / "software" / "cline-cli"
@@ -85,7 +86,13 @@ PROCESS_TIMEOUT_SECONDS = 120
 VERSION_PROBE_TIMEOUT_SECONDS = 60
 SETUP_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 VERSION_PATTERN = re.compile(r"(?<![0-9])([0-9]+\.[0-9]+\.[0-9]+)(?![0-9])")
-BOOTSTRAP_LOCK_KEYS = {"schema_version", "product_name", "canonical_target", "target_key"}
+BOOTSTRAP_LOCK_KEYS = {
+    "schema_version",
+    "product_name",
+    "scope",
+    "canonical_target",
+    "target_key",
+}
 SOFTWARE_DIR_RELATIVE = Path("software") / "cline-cli"
 SOFTWARE_MANIFEST_RELATIVE = Path("software") / "cline-cli.json"
 SOFTWARE_REPLACE_PATHS = (
@@ -718,12 +725,30 @@ def bootstrap_lock_pool(_canonical_target: Path) -> Path:
     return fixed_system_temp_root() / f".{PRODUCT_NAME}-{uid}-lifecycle-locks"
 
 
+def product_lock_path_without_create() -> Path:
+    return bootstrap_lock_pool(Path("/")) / PRODUCT_LOCK_NAME
+
+
 def bootstrap_lock_path(canonical_target: Path) -> Path:
     return bootstrap_lock_pool(canonical_target) / f"{bootstrap_lock_key(canonical_target)}{BOOTSTRAP_LOCK_SUFFIX}"
 
 
-def ensure_bootstrap_lock_pool(canonical_target: Path) -> Path:
+def sync_directory(path: Path, label: str) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        fail(f"cannot open {label} for sync: {exc}")
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        fail(f"cannot sync {label}: {exc}")
+    finally:
+        os.close(descriptor)
+
+
+def ensure_bootstrap_lock_pool(canonical_target: Path | None = None) -> Path:
     pool = bootstrap_lock_pool(canonical_target)
+    created = False
     try:
         info = pool.lstat()
     except FileNotFoundError:
@@ -732,12 +757,22 @@ def ensure_bootstrap_lock_pool(canonical_target: Path) -> Path:
         except FileExistsError:
             info = pool.lstat()
         else:
-            pool.chmod(OWNER_DIRECTORY_MODE)
-            info = pool.lstat()
+            created = True
+            try:
+                pool.chmod(OWNER_DIRECTORY_MODE)
+                sync_directory(pool.parent, "bootstrap lifecycle lock parent")
+                info = pool.lstat()
+            except BaseException:
+                with contextlib.suppress(FileNotFoundError):
+                    pool.rmdir()
+                    sync_directory(pool.parent, "bootstrap lifecycle lock parent")
+                raise
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         fail("bootstrap lifecycle lock pool must be a real directory")
     if not is_owner_private_directory(info):
         fail("bootstrap lifecycle lock pool must be owned by the current user with mode 0700")
+    if created:
+        sync_directory(pool, "bootstrap lifecycle lock pool")
     return pool
 
 
@@ -746,17 +781,7 @@ def canonical_target_for_bootstrap_lock(target: Path) -> Path:
         fail("--target must be an absolute path")
     if target.name in {"", ".", ".."}:
         fail("--target must include a literal target directory name")
-    try:
-        info = target.lstat()
-    except FileNotFoundError:
-        parent = target.parent
-        require_safe_target_parent_for_creation(parent)
-        return parent.resolve() / target.name
-    if stat.S_ISLNK(info.st_mode):
-        fail("--target must not be a symlink")
-    if not stat.S_ISDIR(info.st_mode):
-        fail("--target must be a directory")
-    return target.resolve()
+    return target
 
 
 def require_lock_file(path: Path, label: str) -> os.stat_result:
@@ -773,12 +798,201 @@ def require_lock_file(path: Path, label: str) -> os.stat_result:
     return info
 
 
-def open_persistent_lock_file(path: Path, label: str, *, create: bool) -> int:
-    flags = os.O_RDWR
+def lock_open_flags(*, write: bool = True) -> int:
+    flags = os.O_RDWR if write else os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    return flags
+
+
+def write_all(descriptor: int, content: bytes, *, label: str) -> None:
+    view = memoryview(content)
+    while view:
+        try:
+            written = os.write(descriptor, view)
+        except OSError as exc:
+            fail(f"cannot write {label}: {exc}")
+        if written <= 0:
+            fail(f"cannot write {label}: short write")
+        view = view[written:]
+
+
+def publication_alias_prefix(path: Path) -> str:
+    return f".{path.name}.publish-"
+
+
+def publish_anchor_no_replace(path: Path, content: bytes, label: str) -> None:
+    parent = path.parent
+    ensure_bootstrap_lock_pool(None)
+    temporary = parent / f"{publication_alias_prefix(path)}{os.getpid()}-{time.time_ns()}"
+    descriptor: int | None = None
+    linked = False
+    try:
+        try:
+            descriptor = os.open(
+                temporary,
+                lock_open_flags(write=True) | os.O_CREAT | os.O_EXCL,
+                OWNER_FILE_MODE,
+            )
+        except OSError as exc:
+            fail(f"cannot create temporary {label}: {exc}")
+        try:
+            write_all(descriptor, content, label=label)
+            os.fchmod(descriptor, OWNER_FILE_MODE)
+            os.fsync(descriptor)
+        except OSError as exc:
+            fail(f"cannot prepare {label}: {exc}")
+        finally:
+            os.close(descriptor)
+            descriptor = None
+        try:
+            os.link(temporary, path)
+            linked = True
+        except FileExistsError:
+            return
+        except OSError as exc:
+            fail(f"cannot publish {label}: {exc}")
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            fail(f"cannot remove temporary {label} alias after publication: {exc}")
+        sync_directory(parent, f"{label} parent")
+    finally:
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        if not linked:
+            with contextlib.suppress(FileNotFoundError):
+                temporary.unlink()
+
+
+def recover_anchor_publication_alias(path: Path, descriptor: int, label: str) -> None:
+    opened = os.fstat(descriptor)
+    parent = path.parent
+    aliases: list[Path] = []
+    try:
+        entries = list(parent.iterdir())
+    except OSError as exc:
+        fail(f"cannot inspect {label} publication aliases: {exc}")
+    for entry in entries:
+        if entry == path or not entry.name.startswith(publication_alias_prefix(path)):
+            continue
+        try:
+            info = entry.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(info.st_mode) and identity_of(info) == identity_of(opened):
+            aliases.append(entry)
+        elif entry.name.startswith(publication_alias_prefix(path)):
+            fail(f"{label} has an unknown publication alias")
+    if len(aliases) != 1:
+        fail(f"{label} has an incomplete publication alias")
+    try:
+        aliases[0].unlink()
+    except OSError as exc:
+        fail(f"cannot recover {label} publication alias: {exc}")
+    sync_directory(parent, f"{label} parent")
+
+
+def validate_anchor_descriptor(
+    descriptor: int,
+    path: Path,
+    label: str,
+    binding: dict[str, Any],
+    *,
+    recover_alias: bool,
+) -> None:
+    opened = os.fstat(descriptor)
+    current = require_lock_file_allowing_recoverable_alias(path, label, recover_alias=recover_alias)
+    if identity_of(current) != identity_of(opened):
+        fail_concurrent(f"{label} changed while it was being opened")
+    if opened.st_nlink != 1:
+        if not recover_alias:
+            fail(f"{label} has incomplete publication state")
+        recover_anchor_publication_alias(path, descriptor, label)
+        opened = os.fstat(descriptor)
+        current = require_lock_file_allowing_recoverable_alias(path, label, recover_alias=False)
+        if identity_of(current) != identity_of(opened):
+            fail_concurrent(f"{label} changed during publication alias recovery")
+    if not stat.S_ISREG(opened.st_mode):
+        fail(f"{label} must be a regular file")
+    if not is_owner_only_file(opened):
+        fail(f"{label} must be owned by the current user with mode 0600")
+    content = read_lock_file_descriptor(descriptor, label=label)
+    parsed = parse_json_object(content, label)
+    require_exact_keys(parsed, BOOTSTRAP_LOCK_KEYS, label)
+    if parsed != binding:
+        fail(f"{label} is bound to a different lifecycle scope")
+
+
+def require_lock_file_allowing_recoverable_alias(
+    path: Path,
+    label: str,
+    *,
+    recover_alias: bool,
+) -> os.stat_result:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail(f"{label} is missing")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail(f"{label} must be a regular non-symlink file")
+    if info.st_nlink != 1 and not recover_alias:
+        fail(f"{label} must not have hard-link aliases")
+    if not is_owner_only_file(info):
+        fail(f"{label} must be owned by the current user with mode 0600")
+    return info
+
+
+def open_anchor_file(
+    path: Path,
+    label: str,
+    binding: dict[str, Any],
+    *,
+    create: bool,
+    exclusive: bool,
+    recover_alias: bool,
+) -> int:
+    content = canonical_json(binding)
+    try:
+        descriptor = os.open(path, lock_open_flags(write=True))
+    except FileNotFoundError:
+        if not create:
+            raise
+        publish_anchor_no_replace(path, content, label)
+        try:
+            descriptor = os.open(path, lock_open_flags(write=True))
+        except OSError as exc:
+            fail(f"cannot open published {label}: {exc}")
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            fail(f"{label} must not be a symlink")
+        fail(f"cannot open {label} {path}: {exc}")
+    acquired = False
+    try:
+        acquire_file_lock(descriptor, path, exclusive=exclusive)
+        acquired = True
+        validate_anchor_descriptor(
+            descriptor,
+            path,
+            label,
+            binding,
+            recover_alias=recover_alias,
+        )
+    except BaseException:
+        if acquired:
+            release_file_lock(descriptor)
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def open_persistent_lock_file(path: Path, label: str, *, create: bool) -> int:
+    flags = lock_open_flags(write=True)
     try:
         descriptor = os.open(path, flags)
     except FileNotFoundError:
@@ -836,11 +1050,12 @@ def open_lock_file(target: Path, *, create: bool) -> int:
     return open_persistent_lock_file(path, "target lock file", create=create)
 
 
-def acquire_file_lock(descriptor: int, path: Path) -> None:
+def acquire_file_lock(descriptor: int, path: Path, *, exclusive: bool = True) -> None:
     if fcntl is None:
         fail("target lifecycle locks require POSIX fcntl.flock")
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
     except BlockingIOError:
         fail(f"target is locked: {path}")
     except OSError as exc:
@@ -921,10 +1136,21 @@ def target_lock(target: Path) -> Iterator[None]:
 
 def bootstrap_lock_binding(canonical_target: Path) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "product_name": PRODUCT_NAME,
+        "scope": "canonical-target",
         "canonical_target": str(canonical_target),
         "target_key": bootstrap_lock_key(canonical_target),
+    }
+
+
+def product_lock_binding() -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "product_name": PRODUCT_NAME,
+        "scope": "product",
+        "canonical_target": None,
+        "target_key": None,
     }
 
 
@@ -933,34 +1159,13 @@ def validate_bootstrap_lock_binding(
     path: Path,
     canonical_target: Path,
 ) -> None:
-    opened = os.fstat(descriptor)
-    current = require_lock_file(path, "bootstrap lifecycle lock file")
-    if identity_of(current) != identity_of(opened):
-        fail_concurrent("bootstrap lifecycle lock file changed while locked")
-    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-        fail("bootstrap lifecycle lock file must be a regular file")
-    if not is_owner_only_file(opened):
-        fail("bootstrap lifecycle lock file must be owned by the current user with mode 0600")
-    desired = bootstrap_lock_binding(canonical_target)
-    content = read_lock_file_descriptor(descriptor, label="bootstrap lifecycle lock file")
-    if not content:
-        write_lock_file_descriptor(
-            descriptor,
-            canonical_json(desired),
-            label="bootstrap lifecycle lock file",
-        )
-        verify_locked_file_identity(descriptor, path, "bootstrap lifecycle lock file")
-        return
-    binding = parse_json_object(content, "bootstrap lifecycle lock file")
-    require_exact_keys(binding, BOOTSTRAP_LOCK_KEYS, "bootstrap lifecycle lock file")
-    if (
-        binding["schema_version"] != 1
-        or binding["product_name"] != PRODUCT_NAME
-        or binding["canonical_target"] != str(canonical_target)
-        or binding["target_key"] != bootstrap_lock_key(canonical_target)
-    ):
-        fail("bootstrap lifecycle lock file is bound to a different canonical target")
-    verify_locked_file_identity(descriptor, path, "bootstrap lifecycle lock file")
+    validate_anchor_descriptor(
+        descriptor,
+        path,
+        "bootstrap lifecycle lock file",
+        bootstrap_lock_binding(canonical_target),
+        recover_alias=False,
+    )
 
 
 def verify_locked_file_identity(descriptor: int, path: Path, label: str) -> None:
@@ -976,29 +1181,209 @@ def verify_locked_file_identity(descriptor: int, path: Path, label: str) -> None
 
 @contextlib.contextmanager
 def bootstrap_lifecycle_lock(target: Path) -> Iterator[Path]:
-    canonical_target = canonical_target_for_bootstrap_lock(target)
-    pool = ensure_bootstrap_lock_pool(canonical_target)
-    path = pool / f"{bootstrap_lock_key(canonical_target)}{BOOTSTRAP_LOCK_SUFFIX}"
-    descriptor = open_persistent_lock_file(
-        path,
-        "bootstrap lifecycle lock file",
-        create=True,
-    )
-    acquired = False
-    try:
-        acquire_file_lock(descriptor, path)
-        acquired = True
-        validate_bootstrap_lock_binding(descriptor, path, canonical_target)
+    with coordinated_target(target, mutation=True, create_target_anchor=True) as canonical_target:
         yield canonical_target
+
+
+@contextlib.contextmanager
+def product_lifecycle_lock(*, exclusive: bool, create: bool) -> Iterator[int | None]:
+    try:
+        descriptor = open_product_lifecycle_fd(exclusive=exclusive, create=create)
+    except FileNotFoundError:
+        if create:
+            raise
+        yield None
+        return
+    try:
+        yield descriptor
     finally:
-        if acquired:
+        if descriptor is not None:
             release_file_lock(descriptor)
-        os.close(descriptor)
+            os.close(descriptor)
+
+
+def open_product_lifecycle_fd(*, exclusive: bool, create: bool) -> int:
+    return open_anchor_file(
+        product_lock_path_without_create(),
+        "product lifecycle lock file",
+        product_lock_binding(),
+        create=create,
+        exclusive=exclusive,
+        recover_alias=create and exclusive,
+    )
+
+
+@contextlib.contextmanager
+def canonical_target_anchor_lock(
+    canonical_target: Path,
+    *,
+    exclusive: bool,
+    create: bool,
+) -> Iterator[int | None]:
+    try:
+        descriptor = open_canonical_target_anchor_fd(
+            canonical_target,
+            exclusive=exclusive,
+            create=create,
+        )
+    except FileNotFoundError:
+        if create:
+            raise
+        yield None
+        return
+    try:
+        yield descriptor
+    finally:
+        if descriptor is not None:
+            release_file_lock(descriptor)
+            os.close(descriptor)
+
+
+def open_canonical_target_anchor_fd(
+    canonical_target: Path,
+    *,
+    exclusive: bool,
+    create: bool,
+) -> int:
+    return open_anchor_file(
+        bootstrap_lock_path(canonical_target),
+        "canonical target lifecycle lock file",
+        bootstrap_lock_binding(canonical_target),
+        create=create,
+        exclusive=exclusive,
+        recover_alias=create and exclusive,
+    )
+
+
+def product_anchor_exists() -> bool:
+    path = product_lock_path_without_create()
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail("product lifecycle lock file is malformed")
+    return True
+
+
+def target_anchor_exists(canonical_target: Path) -> bool:
+    path = bootstrap_lock_path(canonical_target)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail("canonical target lifecycle lock file is malformed")
+    return True
+
+
+def reject_orphan_target_anchor(canonical_target: Path) -> None:
+    pool = bootstrap_lock_pool(canonical_target)
+    product_path = product_lock_path_without_create()
+    target_path = bootstrap_lock_path(canonical_target)
+    if not path_present(pool):
+        return
+    if not path_present(product_path) and path_present(target_path):
+        fail("canonical target lifecycle lock exists without product lifecycle lock; explicit repair is required")
+
+
+def canonical_target_under_coordination(target: Path, *, allow_missing: bool) -> Path:
+    if not target.is_absolute():
+        fail("--target must be an absolute path")
+    if target.name in {"", ".", ".."}:
+        fail("--target must include a literal target directory name")
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        if not allow_missing:
+            fail("target is missing")
+        parent = target.parent
+        require_safe_target_parent_for_creation(parent)
+        return parent.resolve() / target.name
+    if stat.S_ISLNK(info.st_mode):
+        fail("--target must not be a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("--target must be a directory")
+    return target.resolve()
+
+
+@contextlib.contextmanager
+def coordinated_target(
+    target: Path,
+    *,
+    mutation: bool,
+    create_target_anchor: bool,
+    allow_missing: bool = True,
+) -> Iterator[Path]:
+    if mutation:
+        product_fd = open_product_lifecycle_fd(exclusive=True, create=True)
+        target_fd: int | None = None
+        try:
+            canonical_target = canonical_target_under_coordination(
+                target, allow_missing=allow_missing
+            )
+            target_fd = open_canonical_target_anchor_fd(
+                canonical_target,
+                exclusive=True,
+                create=create_target_anchor,
+            )
+        finally:
+            release_file_lock(product_fd)
+            os.close(product_fd)
+        try:
+            yield canonical_target
+        finally:
+            if target_fd is not None:
+                release_file_lock(target_fd)
+                os.close(target_fd)
+        return
+
+    if not product_anchor_exists():
+        canonical_target = canonical_target_under_coordination(target, allow_missing=True)
+        reject_orphan_target_anchor(canonical_target)
+        yield canonical_target
+        if product_anchor_exists():
+            with coordinated_target(
+                target,
+                mutation=False,
+                create_target_anchor=False,
+                allow_missing=allow_missing,
+            ) as retried:
+                if retried != canonical_target:
+                    fail_concurrent("target canonical path changed during read coordination retry")
+        return
+
+    product_fd = open_product_lifecycle_fd(exclusive=False, create=False)
+    target_fd: int | None = None
+    try:
+        canonical_target = canonical_target_under_coordination(
+            target, allow_missing=allow_missing
+        )
+        if target_anchor_exists(canonical_target):
+            target_fd = open_canonical_target_anchor_fd(
+                canonical_target,
+                exclusive=False,
+                create=False,
+            )
+            release_file_lock(product_fd)
+            os.close(product_fd)
+            product_fd = -1
+            try:
+                yield canonical_target
+            finally:
+                release_file_lock(target_fd)
+                os.close(target_fd)
+        else:
+            yield canonical_target
+    finally:
+        if product_fd >= 0:
+            release_file_lock(product_fd)
+            os.close(product_fd)
 
 
 @contextlib.contextmanager
 def locked_new_or_existing_target(target: Path) -> Iterator[Path]:
-    with bootstrap_lifecycle_lock(target) as locked_target:
+    with coordinated_target(target, mutation=True, create_target_anchor=True) as locked_target:
         canonical_target = ensure_target_directory(locked_target)
         if canonical_target != locked_target:
             fail_concurrent("target canonical path changed during lifecycle lock acquisition")
@@ -1008,14 +1393,19 @@ def locked_new_or_existing_target(target: Path) -> Iterator[Path]:
 
 @contextlib.contextmanager
 def locked_existing_target(target: Path) -> Iterator[Path]:
-    with bootstrap_lifecycle_lock(target) as canonical_target:
+    with coordinated_target(
+        target,
+        mutation=True,
+        create_target_anchor=True,
+        allow_missing=False,
+    ) as canonical_target:
         with target_lock(canonical_target):
             yield canonical_target
 
 
 @contextlib.contextmanager
 def locked_inspection_target(target: Path) -> Iterator[Path]:
-    with bootstrap_lifecycle_lock(target) as canonical_target:
+    with coordinated_target(target, mutation=False, create_target_anchor=False) as canonical_target:
         yield canonical_target
 
 
