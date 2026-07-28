@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "captured_at": "2026-07-27",
+  "captured_at": "2026-07-29",
   "product": "Cline",
   "cli": {
     "command": "cline",
@@ -89,6 +89,42 @@
       }
     }
   },
+  "desktop_release_observation": {
+    "install_supported_by_manager": false,
+    "launch_supported_by_manager": false,
+    "repository": "cline/cline",
+    "tag": "desktop-v0.0.6",
+    "version": "0.0.6",
+    "published_at": "2026-07-28T02:10:46Z",
+    "url": "https://github.com/cline/cline/releases/tag/desktop-v0.0.6",
+    "assets": {
+      "macos-arm64-app-tar": {
+        "name": "Cline-Code_0.0.6_aarch64.app.tar.gz",
+        "size": 32791712,
+        "url": "https://github.com/cline/cline/releases/download/desktop-v0.0.6/Cline-Code_0.0.6_aarch64.app.tar.gz"
+      },
+      "macos-arm64-dmg": {
+        "name": "Cline-Code_0.0.6_aarch64.dmg",
+        "size": 32349063,
+        "url": "https://github.com/cline/cline/releases/download/desktop-v0.0.6/Cline-Code_0.0.6_aarch64.dmg"
+      },
+      "macos-x64-app-tar": {
+        "name": "Cline-Code_0.0.6_x86_64.app.tar.gz",
+        "size": 35699705,
+        "url": "https://github.com/cline/cline/releases/download/desktop-v0.0.6/Cline-Code_0.0.6_x86_64.app.tar.gz"
+      },
+      "macos-x64-dmg": {
+        "name": "Cline-Code_0.0.6_x86_64.dmg",
+        "size": 35532261,
+        "url": "https://github.com/cline/cline/releases/download/desktop-v0.0.6/Cline-Code_0.0.6_x86_64.dmg"
+      },
+      "latest-json": {
+        "name": "latest.json",
+        "size": 2370,
+        "url": "https://github.com/cline/cline/releases/download/desktop-v0.0.6/latest.json"
+      }
+    }
+  },
   "native_surfaces": {
     "global_root": "~/.cline/",
     "cli_data_dir_flag": "--data-dir",
@@ -121,6 +157,7 @@
     "https://raw.githubusercontent.com/cline/cline/main/sdk/packages/shared/src/storage/paths.ts",
     "https://raw.githubusercontent.com/cline/cline/main/sdk/packages/core/src/hooks/hook-file-config.ts",
     "https://raw.githubusercontent.com/cline/cline/main/sdk/packages/core/src/hooks/hook-file-hooks.ts",
+    "https://github.com/cline/cline/releases/tag/desktop-v0.0.6",
     "https://github.com/cline/cline/releases/tag/v4.0.11",
     "https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev",
     "https://docs.npmjs.com/cli/v11/commands/npm-ci/",
