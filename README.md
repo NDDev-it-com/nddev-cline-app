@@ -80,10 +80,12 @@ temp directory, and XDG directories. It preflights Node.js, validates the lock
 digest and package-lock shape against `references/cline-baseline.json`, disables
 npm lifecycle scripts and bin links, probes `cline --version` through the
 package wrapper, writes a software manifest, and swaps the software surface
-atomically.
+atomically. Retired target-owned software is represented by the target-bound
+cleanup journal until it is drained.
 
 `software-status` is read-only and validates the manifest and tree digest
-without executing the target binary.
+without executing the target binary. `status`, `plan`, and `software-status`
+also expose valid `cleanup_pending` state without repairing or deleting it.
 
 Launch forwards stdio and the child exit code:
 

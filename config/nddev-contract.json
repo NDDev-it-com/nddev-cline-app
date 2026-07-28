@@ -147,7 +147,10 @@
     "bounded_reads": true,
     "rollback_on_failure": true,
     "target_bound_backups": true,
+    "backup_envelope_schema": 2,
+    "backup_payload_integrity": "canonical per-file size and sha256 bound to each relative backup payload path; corruption/incoherent edits are rejected before restore mutation",
     "backup_pool_marker": "NDDEV-CLINE-BACKUPS.json",
+    "cleanup_pending": "post-commit retired managed, backup, and software trees are represented by a bounded target-bound cleanup journal under .nddev-cline-control; read-only commands expose valid pending state without repair, and mutating commands drain before active changes",
     "unique_transaction_directories": true,
     "preexisting_collision_paths_removed": false,
     "backup_slots": 10
