@@ -1741,7 +1741,7 @@ def restore_snapshot(target: Path, snapshot: dict[Path, tuple[int, int] | None])
 
 def replace_managed_state(
     target: Path, desired: dict[Path, bytes | None], expected: dict[str, Any]
-) -> bool:
+) -> tuple[bool, dict[str, Any]]:
     if expected.get("state") in {"managed", "legacy-managed"}:
         stamp = load_stamp(target)
         if stamp is None:
@@ -1783,6 +1783,7 @@ def replace_managed_state(
             installed_new.append(relative)
             sync_directory(destination.parent, f"managed file {relative} parent")
         prune_empty_managed_dirs(target, tuple(desired))
+        post_state = inspect_target(target)
         cleanup_created = publish_cleanup_pending_for_paths(
             target,
             [hold_root],
@@ -1821,7 +1822,7 @@ def replace_managed_state(
         with contextlib.suppress(OSError):
             if directory.is_dir() and not directory.is_symlink() and not any(directory.iterdir()):
                 directory.rmdir()
-    return cleanup_pending
+    return cleanup_pending, post_state
 
 
 def changed_paths(target: Path, desired: dict[Path, bytes | None]) -> list[str]:
@@ -2153,8 +2154,9 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
             if state["state"] == "managed" and changed:
                 backup_slot = create_backup(canonical_target, state)
             if changed:
-                cleanup_pending = replace_managed_state(canonical_target, desired, state)
-            post = inspect_target(canonical_target)
+                cleanup_pending, post = replace_managed_state(canonical_target, desired, state)
+            else:
+                post = inspect_target(canonical_target)
         except BaseException:
             rollback_created_backup_pool(
                 canonical_target,
@@ -2243,8 +2245,7 @@ def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any
         cleanup_pending = False
         try:
             backup_slot = create_backup(canonical_target, state)
-            cleanup_pending = replace_managed_state(canonical_target, desired, state)
-            post = inspect_target(canonical_target)
+            cleanup_pending, post = replace_managed_state(canonical_target, desired, state)
         except BaseException:
             rollback_created_backup_pool(
                 canonical_target,
@@ -2280,7 +2281,7 @@ def remove_setup(target: Path) -> dict[str, Any]:
         cleanup_pending = False
         try:
             backup_slot = create_backup(canonical_target, state)
-            cleanup_pending = replace_managed_state(canonical_target, desired, state)
+            cleanup_pending, _post = replace_managed_state(canonical_target, desired, state)
         except BaseException:
             rollback_created_backup_pool(
                 canonical_target,
@@ -2312,8 +2313,7 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
                 desired[relative] = None
         cleanup_pending = False
         try:
-            cleanup_pending = replace_managed_state(canonical_target, desired, state)
-            post = inspect_target(canonical_target)
+            cleanup_pending, post = replace_managed_state(canonical_target, desired, state)
         except BaseException:
             raise
     return {
