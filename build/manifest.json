@@ -68,7 +68,7 @@
     "cli_command": "cline",
     "extension_tested_version": "4.0.11",
     "vscode_extension_id": "saoudrizwan.claude-dev",
-    "supported_platforms": ["macos-arm64", "macos-x64", "ubuntu-linux-arm64", "ubuntu-linux-x64"],
+    "supported_platforms": ["macos-arm64", "macos-x64", "ubuntu-glibc-arm64", "ubuntu-glibc-x64"],
     "unsupported_platforms": ["windows"]
   },
   "software_lifecycle": {
@@ -103,9 +103,11 @@
     "update_precondition": "installed or partial target-owned CLI software surface; absent fails without side effects",
     "absent_update_policy": "domain failure: Cline CLI is not installed; use install-cli; zero target or parent artifacts",
     "preflight_policy": "lstat-no-follow current-user-private target and parent before npm registry/install work",
-    "transaction_directories": "unique private mkdtemp staging with transaction-owned rollback",
+    "transaction_directories": "unique private staging plus target-bound cleanup journal for retired managed, backup, and software trees",
+    "cleanup_pending": "valid cleanup-pending state is reported by read-only commands, launch fails closed while it exists, and the next mutating command drains it before active changes",
+    "cleanup_journal_schema": 2,
     "partial_state_policy": "install rejects any replace path or owned software parent; update may repair safe partial state",
-    "launch_handoff_policy": "persistent external/bootstrap O_NOFOLLOW fcntl lock file under fixed system temp per-product/per-UID private root held through full lifecycle, plus target-internal O_NOFOLLOW fcntl lock file below a dedicated lock directory held through child completion; acquisition external first/internal second and release internal first/external last; only the internal lock directory and immutable executable/software artifact directories are temporarily read/execute-only while mutable target, HOME, config, TMP, XDG, runtime, and sandbox directories stay writable; manifest is current before protection; entrypoint and package-wrapper identities plus O_NOFOLLOW SHA-256 byte digests are revalidated immediately before path-based spawn",
+    "launch_handoff_policy": "monotonic product global.lock and canonical-target O_NOFOLLOW fcntl anchors under fixed system temp per-product/per-UID private root; read-only commands open existing anchors no-create; launch additionally holds a target-internal O_NOFOLLOW fcntl lock file below a dedicated lock directory through child completion; acquisition product external/canonical external/internal and release internal before canonical external; only the internal lock directory and immutable executable/software artifact directories are temporarily read/execute-only while mutable target, HOME, config, TMP, XDG, runtime, and sandbox directories stay writable; manifest is current before protection; entrypoint and package-wrapper identities plus O_NOFOLLOW SHA-256 byte digests are revalidated immediately before path-based spawn",
     "current_idempotent": true,
     "version_probe": {
       "argv": ["bin/cline", "--version"],

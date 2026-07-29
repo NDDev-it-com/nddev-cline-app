@@ -9,6 +9,7 @@ import errno
 import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -39,6 +40,7 @@ BACKUP_NAME = "NDDEV-CLINE-BACKUP.json"
 LOCK_DIRECTORY_NAME = ".nddev-cline-lock"
 LOCK_FILE_NAME = "lock"
 BOOTSTRAP_LOCK_POOL_NAME = ".nddev-cline-lifecycle-locks"
+PRODUCT_LOCK_NAME = "global.lock"
 BOOTSTRAP_LOCK_SUFFIX = ".lock"
 BASELINE_REF = ROOT / "references" / "cline-baseline.json"
 INSTALL_LOCK_ROOT = ROOT / "software" / "cline-cli"
@@ -85,9 +87,23 @@ PROCESS_TIMEOUT_SECONDS = 120
 VERSION_PROBE_TIMEOUT_SECONDS = 60
 SETUP_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 VERSION_PATTERN = re.compile(r"(?<![0-9])([0-9]+\.[0-9]+\.[0-9]+)(?![0-9])")
-BOOTSTRAP_LOCK_KEYS = {"schema_version", "product_name", "canonical_target", "target_key"}
+BOOTSTRAP_LOCK_KEYS = {
+    "schema_version",
+    "product_name",
+    "scope",
+    "canonical_target",
+    "target_key",
+}
 SOFTWARE_DIR_RELATIVE = Path("software") / "cline-cli"
 SOFTWARE_MANIFEST_RELATIVE = Path("software") / "cline-cli.json"
+MANAGER_CONTROL_RELATIVE = Path(".nddev-cline-control")
+CLEANUP_PARENT_RELATIVE = MANAGER_CONTROL_RELATIVE / "cleanup"
+CLEANUP_TOMBSTONES_RELATIVE = CLEANUP_PARENT_RELATIVE / "tombstones"
+CLEANUP_PENDING_NAME = "pending.json"
+CLEANUP_INTENT_PREFIX = "intent-"
+CLEANUP_SCHEMA_VERSION = 2
+CLEANUP_MAX_ENTRIES = 20000
+CLEANUP_JOURNAL_MAX_BYTES = 2 * 1024 * 1024
 SOFTWARE_REPLACE_PATHS = (
     Path("bin") / COMMAND_NAME,
     SOFTWARE_DIR_RELATIVE,
@@ -198,6 +214,7 @@ BACKUP_KEYS = {
     "canonical_target",
     "source_setup_id",
     "managed_files",
+    "files",
     "created_at",
 }
 BACKUP_POOL_KEYS = {
@@ -718,12 +735,30 @@ def bootstrap_lock_pool(_canonical_target: Path) -> Path:
     return fixed_system_temp_root() / f".{PRODUCT_NAME}-{uid}-lifecycle-locks"
 
 
+def product_lock_path_without_create() -> Path:
+    return bootstrap_lock_pool(Path("/")) / PRODUCT_LOCK_NAME
+
+
 def bootstrap_lock_path(canonical_target: Path) -> Path:
     return bootstrap_lock_pool(canonical_target) / f"{bootstrap_lock_key(canonical_target)}{BOOTSTRAP_LOCK_SUFFIX}"
 
 
-def ensure_bootstrap_lock_pool(canonical_target: Path) -> Path:
+def sync_directory(path: Path, label: str) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        fail(f"cannot open {label} for sync: {exc}")
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        fail(f"cannot sync {label}: {exc}")
+    finally:
+        os.close(descriptor)
+
+
+def ensure_bootstrap_lock_pool(canonical_target: Path | None = None) -> Path:
     pool = bootstrap_lock_pool(canonical_target)
+    created = False
     try:
         info = pool.lstat()
     except FileNotFoundError:
@@ -732,12 +767,22 @@ def ensure_bootstrap_lock_pool(canonical_target: Path) -> Path:
         except FileExistsError:
             info = pool.lstat()
         else:
-            pool.chmod(OWNER_DIRECTORY_MODE)
-            info = pool.lstat()
+            created = True
+            try:
+                pool.chmod(OWNER_DIRECTORY_MODE)
+                sync_directory(pool.parent, "bootstrap lifecycle lock parent")
+                info = pool.lstat()
+            except BaseException:
+                with contextlib.suppress(FileNotFoundError):
+                    pool.rmdir()
+                    sync_directory(pool.parent, "bootstrap lifecycle lock parent")
+                raise
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         fail("bootstrap lifecycle lock pool must be a real directory")
     if not is_owner_private_directory(info):
         fail("bootstrap lifecycle lock pool must be owned by the current user with mode 0700")
+    if created:
+        sync_directory(pool, "bootstrap lifecycle lock pool")
     return pool
 
 
@@ -746,17 +791,7 @@ def canonical_target_for_bootstrap_lock(target: Path) -> Path:
         fail("--target must be an absolute path")
     if target.name in {"", ".", ".."}:
         fail("--target must include a literal target directory name")
-    try:
-        info = target.lstat()
-    except FileNotFoundError:
-        parent = target.parent
-        require_safe_target_parent_for_creation(parent)
-        return parent.resolve() / target.name
-    if stat.S_ISLNK(info.st_mode):
-        fail("--target must not be a symlink")
-    if not stat.S_ISDIR(info.st_mode):
-        fail("--target must be a directory")
-    return target.resolve()
+    return target
 
 
 def require_lock_file(path: Path, label: str) -> os.stat_result:
@@ -773,12 +808,283 @@ def require_lock_file(path: Path, label: str) -> os.stat_result:
     return info
 
 
-def open_persistent_lock_file(path: Path, label: str, *, create: bool) -> int:
-    flags = os.O_RDWR
+def lock_open_flags(*, write: bool = True) -> int:
+    flags = os.O_RDWR if write else os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    return flags
+
+
+def write_all(descriptor: int, content: bytes, *, label: str) -> None:
+    view = memoryview(content)
+    while view:
+        try:
+            written = os.write(descriptor, view)
+        except OSError as exc:
+            fail(f"cannot write {label}: {exc}")
+        if written <= 0:
+            fail(f"cannot write {label}: short write")
+        view = view[written:]
+
+
+def publication_alias_prefix(path: Path) -> str:
+    return f".{path.name}.publish-"
+
+
+def publish_anchor_no_replace(path: Path, content: bytes, label: str) -> None:
+    parent = path.parent
+    ensure_bootstrap_lock_pool(None)
+    temporary = parent / f"{publication_alias_prefix(path)}{os.getpid()}-{time.time_ns()}"
+    descriptor: int | None = None
+    linked = False
+    try:
+        try:
+            descriptor = os.open(
+                temporary,
+                lock_open_flags(write=True) | os.O_CREAT | os.O_EXCL,
+                OWNER_FILE_MODE,
+            )
+        except OSError as exc:
+            fail(f"cannot create temporary {label}: {exc}")
+        try:
+            write_all(descriptor, content, label=label)
+            os.fchmod(descriptor, OWNER_FILE_MODE)
+            os.fsync(descriptor)
+        except OSError as exc:
+            fail(f"cannot prepare {label}: {exc}")
+        finally:
+            os.close(descriptor)
+            descriptor = None
+        try:
+            os.link(temporary, path)
+            linked = True
+        except FileExistsError:
+            return
+        except OSError as exc:
+            fail(f"cannot publish {label}: {exc}")
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            fail(f"cannot remove temporary {label} alias after publication: {exc}")
+        sync_directory(parent, f"{label} parent")
+    finally:
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        if not linked:
+            with contextlib.suppress(FileNotFoundError):
+                temporary.unlink()
+
+
+def publish_regular_file_no_replace(path: Path, content: bytes, label: str) -> None:
+    if len(content) > CLEANUP_JOURNAL_MAX_BYTES:
+        fail(f"{label} exceeds the serialized metadata size limit")
+    parent = path.parent
+    parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    parent.chmod(OWNER_DIRECTORY_MODE)
+    temporary = parent / f".{path.name}.publish-{os.getpid()}-{time.time_ns()}"
+    descriptor: int | None = None
+    linked = False
+    try:
+        try:
+            descriptor = os.open(
+                temporary,
+                lock_open_flags(write=True) | os.O_CREAT | os.O_EXCL,
+                OWNER_FILE_MODE,
+            )
+        except OSError as exc:
+            fail(f"cannot create temporary {label}: {exc}")
+        try:
+            write_all(descriptor, content, label=label)
+            os.fchmod(descriptor, OWNER_FILE_MODE)
+            os.fsync(descriptor)
+        except OSError as exc:
+            fail(f"cannot prepare {label}: {exc}")
+        finally:
+            os.close(descriptor)
+            descriptor = None
+        try:
+            os.link(temporary, path)
+            linked = True
+        except FileExistsError:
+            fail(f"{label} already exists")
+        except OSError as exc:
+            fail(f"cannot publish {label}: {exc}")
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            fail(f"cannot remove temporary {label} alias after publication: {exc}")
+        sync_directory(parent, f"{label} parent")
+    finally:
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        if not linked:
+            with contextlib.suppress(FileNotFoundError):
+                temporary.unlink()
+
+
+def write_regular_file_atomic(path: Path, content: bytes, mode: int, label: str) -> None:
+    parent = path.parent
+    parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    parent.chmod(OWNER_DIRECTORY_MODE)
+    temporary = parent / f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}"
+    try:
+        descriptor = os.open(
+            temporary,
+            lock_open_flags(write=True) | os.O_CREAT | os.O_EXCL,
+            mode,
+        )
+    except OSError as exc:
+        fail(f"cannot create temporary {label}: {exc}")
+    try:
+        try:
+            write_all(descriptor, content, label=label)
+            os.fchmod(descriptor, mode)
+            os.fsync(descriptor)
+        except OSError as exc:
+            fail(f"cannot prepare {label}: {exc}")
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, path)
+        os.chmod(path, mode)
+        sync_directory(parent, f"{label} parent")
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+        raise
+
+
+def recover_anchor_publication_alias(path: Path, descriptor: int, label: str) -> None:
+    opened = os.fstat(descriptor)
+    parent = path.parent
+    aliases: list[Path] = []
+    try:
+        entries = list(parent.iterdir())
+    except OSError as exc:
+        fail(f"cannot inspect {label} publication aliases: {exc}")
+    for entry in entries:
+        if entry == path or not entry.name.startswith(publication_alias_prefix(path)):
+            continue
+        try:
+            info = entry.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(info.st_mode) and identity_of(info) == identity_of(opened):
+            aliases.append(entry)
+        elif entry.name.startswith(publication_alias_prefix(path)):
+            fail(f"{label} has an unknown publication alias")
+    if len(aliases) != 1:
+        fail(f"{label} has an incomplete publication alias")
+    try:
+        aliases[0].unlink()
+    except OSError as exc:
+        fail(f"cannot recover {label} publication alias: {exc}")
+    sync_directory(parent, f"{label} parent")
+
+
+def validate_anchor_descriptor(
+    descriptor: int,
+    path: Path,
+    label: str,
+    binding: dict[str, Any],
+    *,
+    recover_alias: bool,
+) -> None:
+    opened = os.fstat(descriptor)
+    current = require_lock_file_allowing_recoverable_alias(path, label, recover_alias=recover_alias)
+    if identity_of(current) != identity_of(opened):
+        fail_concurrent(f"{label} changed while it was being opened")
+    if opened.st_nlink != 1:
+        if not recover_alias:
+            fail(f"{label} has incomplete publication state")
+        recover_anchor_publication_alias(path, descriptor, label)
+        opened = os.fstat(descriptor)
+        current = require_lock_file_allowing_recoverable_alias(path, label, recover_alias=False)
+        if identity_of(current) != identity_of(opened):
+            fail_concurrent(f"{label} changed during publication alias recovery")
+    if not stat.S_ISREG(opened.st_mode):
+        fail(f"{label} must be a regular file")
+    if not is_owner_only_file(opened):
+        fail(f"{label} must be owned by the current user with mode 0600")
+    content = read_lock_file_descriptor(descriptor, label=label)
+    parsed = parse_json_object(content, label)
+    require_exact_keys(parsed, BOOTSTRAP_LOCK_KEYS, label)
+    if parsed != binding:
+        fail(f"{label} is bound to a different lifecycle scope")
+
+
+def require_lock_file_allowing_recoverable_alias(
+    path: Path,
+    label: str,
+    *,
+    recover_alias: bool,
+) -> os.stat_result:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail(f"{label} is missing")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail(f"{label} must be a regular non-symlink file")
+    if info.st_nlink != 1 and not recover_alias:
+        fail(f"{label} must not have hard-link aliases")
+    if not is_owner_only_file(info):
+        fail(f"{label} must be owned by the current user with mode 0600")
+    return info
+
+
+def open_anchor_file(
+    path: Path,
+    label: str,
+    binding: dict[str, Any],
+    *,
+    create: bool,
+    exclusive: bool,
+    recover_alias: bool,
+) -> int:
+    content = canonical_json(binding)
+    try:
+        descriptor = os.open(path, lock_open_flags(write=True))
+    except FileNotFoundError:
+        if not create:
+            raise
+        publish_anchor_no_replace(path, content, label)
+        try:
+            descriptor = os.open(path, lock_open_flags(write=True))
+        except OSError as exc:
+            fail(f"cannot open published {label}: {exc}")
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            fail(f"{label} must not be a symlink")
+        fail(f"cannot open {label} {path}: {exc}")
+    acquired = False
+    try:
+        acquire_file_lock(descriptor, path, exclusive=exclusive)
+        acquired = True
+        validate_anchor_descriptor(
+            descriptor,
+            path,
+            label,
+            binding,
+            recover_alias=recover_alias,
+        )
+    except BaseException:
+        if acquired:
+            release_file_lock(descriptor)
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def open_persistent_lock_file(path: Path, label: str, *, create: bool) -> int:
+    flags = lock_open_flags(write=True)
     try:
         descriptor = os.open(path, flags)
     except FileNotFoundError:
@@ -821,26 +1127,17 @@ def read_lock_file_descriptor(descriptor: int, *, label: str) -> bytes:
         fail(f"cannot read {label}: {exc}")
 
 
-def write_lock_file_descriptor(descriptor: int, content: bytes, *, label: str) -> None:
-    try:
-        os.ftruncate(descriptor, 0)
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        os.write(descriptor, content)
-        os.fchmod(descriptor, OWNER_FILE_MODE)
-    except OSError as exc:
-        fail(f"cannot write {label}: {exc}")
-
-
 def open_lock_file(target: Path, *, create: bool) -> int:
     path = lock_path(target)
     return open_persistent_lock_file(path, "target lock file", create=create)
 
 
-def acquire_file_lock(descriptor: int, path: Path) -> None:
+def acquire_file_lock(descriptor: int, path: Path, *, exclusive: bool = True) -> None:
     if fcntl is None:
         fail("target lifecycle locks require POSIX fcntl.flock")
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
     except BlockingIOError:
         fail(f"target is locked: {path}")
     except OSError as exc:
@@ -921,10 +1218,21 @@ def target_lock(target: Path) -> Iterator[None]:
 
 def bootstrap_lock_binding(canonical_target: Path) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "product_name": PRODUCT_NAME,
+        "scope": "canonical-target",
         "canonical_target": str(canonical_target),
         "target_key": bootstrap_lock_key(canonical_target),
+    }
+
+
+def product_lock_binding() -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "product_name": PRODUCT_NAME,
+        "scope": "product",
+        "canonical_target": None,
+        "target_key": None,
     }
 
 
@@ -933,34 +1241,13 @@ def validate_bootstrap_lock_binding(
     path: Path,
     canonical_target: Path,
 ) -> None:
-    opened = os.fstat(descriptor)
-    current = require_lock_file(path, "bootstrap lifecycle lock file")
-    if identity_of(current) != identity_of(opened):
-        fail_concurrent("bootstrap lifecycle lock file changed while locked")
-    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-        fail("bootstrap lifecycle lock file must be a regular file")
-    if not is_owner_only_file(opened):
-        fail("bootstrap lifecycle lock file must be owned by the current user with mode 0600")
-    desired = bootstrap_lock_binding(canonical_target)
-    content = read_lock_file_descriptor(descriptor, label="bootstrap lifecycle lock file")
-    if not content:
-        write_lock_file_descriptor(
-            descriptor,
-            canonical_json(desired),
-            label="bootstrap lifecycle lock file",
-        )
-        verify_locked_file_identity(descriptor, path, "bootstrap lifecycle lock file")
-        return
-    binding = parse_json_object(content, "bootstrap lifecycle lock file")
-    require_exact_keys(binding, BOOTSTRAP_LOCK_KEYS, "bootstrap lifecycle lock file")
-    if (
-        binding["schema_version"] != 1
-        or binding["product_name"] != PRODUCT_NAME
-        or binding["canonical_target"] != str(canonical_target)
-        or binding["target_key"] != bootstrap_lock_key(canonical_target)
-    ):
-        fail("bootstrap lifecycle lock file is bound to a different canonical target")
-    verify_locked_file_identity(descriptor, path, "bootstrap lifecycle lock file")
+    validate_anchor_descriptor(
+        descriptor,
+        path,
+        "bootstrap lifecycle lock file",
+        bootstrap_lock_binding(canonical_target),
+        recover_alias=False,
+    )
 
 
 def verify_locked_file_identity(descriptor: int, path: Path, label: str) -> None:
@@ -976,46 +1263,241 @@ def verify_locked_file_identity(descriptor: int, path: Path, label: str) -> None
 
 @contextlib.contextmanager
 def bootstrap_lifecycle_lock(target: Path) -> Iterator[Path]:
-    canonical_target = canonical_target_for_bootstrap_lock(target)
-    pool = ensure_bootstrap_lock_pool(canonical_target)
-    path = pool / f"{bootstrap_lock_key(canonical_target)}{BOOTSTRAP_LOCK_SUFFIX}"
-    descriptor = open_persistent_lock_file(
-        path,
-        "bootstrap lifecycle lock file",
-        create=True,
-    )
-    acquired = False
-    try:
-        acquire_file_lock(descriptor, path)
-        acquired = True
-        validate_bootstrap_lock_binding(descriptor, path, canonical_target)
+    with coordinated_target(target, mutation=True, create_target_anchor=True) as canonical_target:
         yield canonical_target
+
+
+@contextlib.contextmanager
+def product_lifecycle_lock(*, exclusive: bool, create: bool) -> Iterator[int | None]:
+    try:
+        descriptor = open_product_lifecycle_fd(exclusive=exclusive, create=create)
+    except FileNotFoundError:
+        if create:
+            raise
+        yield None
+        return
+    try:
+        yield descriptor
     finally:
-        if acquired:
+        if descriptor is not None:
             release_file_lock(descriptor)
-        os.close(descriptor)
+            os.close(descriptor)
+
+
+def open_product_lifecycle_fd(*, exclusive: bool, create: bool) -> int:
+    return open_anchor_file(
+        product_lock_path_without_create(),
+        "product lifecycle lock file",
+        product_lock_binding(),
+        create=create,
+        exclusive=exclusive,
+        recover_alias=create and exclusive,
+    )
+
+
+@contextlib.contextmanager
+def canonical_target_anchor_lock(
+    canonical_target: Path,
+    *,
+    exclusive: bool,
+    create: bool,
+) -> Iterator[int | None]:
+    try:
+        descriptor = open_canonical_target_anchor_fd(
+            canonical_target,
+            exclusive=exclusive,
+            create=create,
+        )
+    except FileNotFoundError:
+        if create:
+            raise
+        yield None
+        return
+    try:
+        yield descriptor
+    finally:
+        if descriptor is not None:
+            release_file_lock(descriptor)
+            os.close(descriptor)
+
+
+def open_canonical_target_anchor_fd(
+    canonical_target: Path,
+    *,
+    exclusive: bool,
+    create: bool,
+) -> int:
+    return open_anchor_file(
+        bootstrap_lock_path(canonical_target),
+        "canonical target lifecycle lock file",
+        bootstrap_lock_binding(canonical_target),
+        create=create,
+        exclusive=exclusive,
+        recover_alias=create and exclusive,
+    )
+
+
+def product_anchor_exists() -> bool:
+    path = product_lock_path_without_create()
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail("product lifecycle lock file is malformed")
+    return True
+
+
+def target_anchor_exists(canonical_target: Path) -> bool:
+    path = bootstrap_lock_path(canonical_target)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail("canonical target lifecycle lock file is malformed")
+    return True
+
+
+def reject_orphan_target_anchor(canonical_target: Path) -> None:
+    pool = bootstrap_lock_pool(canonical_target)
+    product_path = product_lock_path_without_create()
+    target_path = bootstrap_lock_path(canonical_target)
+    if not path_present(pool):
+        return
+    if not path_present(product_path) and path_present(target_path):
+        fail("canonical target lifecycle lock exists without product lifecycle lock; explicit repair is required")
+
+
+def canonical_target_under_coordination(target: Path, *, allow_missing: bool) -> Path:
+    if not target.is_absolute():
+        fail("--target must be an absolute path")
+    if target.name in {"", ".", ".."}:
+        fail("--target must include a literal target directory name")
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        if not allow_missing:
+            fail("target is missing")
+        parent = target.parent
+        require_safe_target_parent_for_creation(parent)
+        return parent.resolve() / target.name
+    if stat.S_ISLNK(info.st_mode):
+        fail("--target must not be a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("--target must be a directory")
+    return target.resolve()
+
+
+@contextlib.contextmanager
+def coordinated_target(
+    target: Path,
+    *,
+    mutation: bool,
+    create_target_anchor: bool,
+    allow_missing: bool = True,
+) -> Iterator[Path]:
+    if mutation:
+        product_fd = open_product_lifecycle_fd(exclusive=True, create=True)
+        target_fd: int | None = None
+        try:
+            canonical_target = canonical_target_under_coordination(
+                target, allow_missing=allow_missing
+            )
+            target_fd = open_canonical_target_anchor_fd(
+                canonical_target,
+                exclusive=True,
+                create=create_target_anchor,
+            )
+        finally:
+            release_file_lock(product_fd)
+            os.close(product_fd)
+        try:
+            yield canonical_target
+        finally:
+            if target_fd is not None:
+                release_file_lock(target_fd)
+                os.close(target_fd)
+        return
+
+    if not product_anchor_exists():
+        canonical_target = canonical_target_under_coordination(target, allow_missing=True)
+        reject_orphan_target_anchor(canonical_target)
+        yield canonical_target
+        if product_anchor_exists():
+            with coordinated_target(
+                target,
+                mutation=False,
+                create_target_anchor=False,
+                allow_missing=allow_missing,
+            ) as retried:
+                if retried != canonical_target:
+                    fail_concurrent("target canonical path changed during read coordination retry")
+        return
+
+    product_fd = open_product_lifecycle_fd(exclusive=False, create=False)
+    target_fd: int | None = None
+    try:
+        canonical_target = canonical_target_under_coordination(
+            target, allow_missing=allow_missing
+        )
+        if target_anchor_exists(canonical_target):
+            target_fd = open_canonical_target_anchor_fd(
+                canonical_target,
+                exclusive=False,
+                create=False,
+            )
+            release_file_lock(product_fd)
+            os.close(product_fd)
+            product_fd = -1
+            try:
+                yield canonical_target
+            finally:
+                release_file_lock(target_fd)
+                os.close(target_fd)
+        else:
+            yield canonical_target
+    finally:
+        if product_fd >= 0:
+            release_file_lock(product_fd)
+            os.close(product_fd)
 
 
 @contextlib.contextmanager
 def locked_new_or_existing_target(target: Path) -> Iterator[Path]:
-    with bootstrap_lifecycle_lock(target) as locked_target:
+    with locked_new_or_existing_target_with_creation(target) as (canonical_target, _created, _parent):
+        yield canonical_target
+
+
+@contextlib.contextmanager
+def locked_new_or_existing_target_with_creation(
+    target: Path,
+) -> Iterator[tuple[Path, bool, dict[str, Any] | None]]:
+    with coordinated_target(target, mutation=True, create_target_anchor=True) as locked_target:
+        created_target = not path_present(locked_target)
+        parent_metadata = directory_metadata(locked_target.parent) if created_target else None
         canonical_target = ensure_target_directory(locked_target)
         if canonical_target != locked_target:
             fail_concurrent("target canonical path changed during lifecycle lock acquisition")
         with target_lock(canonical_target):
-            yield canonical_target
+            yield canonical_target, created_target, parent_metadata
 
 
 @contextlib.contextmanager
 def locked_existing_target(target: Path) -> Iterator[Path]:
-    with bootstrap_lifecycle_lock(target) as canonical_target:
+    with coordinated_target(
+        target,
+        mutation=True,
+        create_target_anchor=True,
+        allow_missing=False,
+    ) as canonical_target:
         with target_lock(canonical_target):
             yield canonical_target
 
 
 @contextlib.contextmanager
 def locked_inspection_target(target: Path) -> Iterator[Path]:
-    with bootstrap_lifecycle_lock(target) as canonical_target:
+    with coordinated_target(target, mutation=False, create_target_anchor=False) as canonical_target:
         yield canonical_target
 
 
@@ -1183,7 +1665,7 @@ def inspect_target(target: Path) -> dict[str, Any]:
     try:
         info = target.lstat()
     except FileNotFoundError:
-        return {"state": "missing", "target": str(target)}
+        return {"state": "missing", "target": str(target), "cleanup_pending": False}
     if stat.S_ISLNK(info.st_mode):
         fail("target must not be a symlink")
     if not stat.S_ISDIR(info.st_mode):
@@ -1194,7 +1676,7 @@ def inspect_target(target: Path) -> dict[str, Any]:
     if stamp is None:
         if any_managed_path_exists(target):
             fail("unmanaged target contains nddev-managed paths")
-        return {"state": "unmanaged", "target": str(target)}
+        return {"state": "unmanaged", "target": str(target), **cleanup_pending_metadata(target)}
     state_name = "legacy-managed" if stamp.get("legacy") else "managed"
     result = {
         "state": state_name,
@@ -1207,6 +1689,7 @@ def inspect_target(target: Path) -> dict[str, Any]:
         "launch_args": stamp["launch_args"],
         "command_permissions": stamp["command_permissions"],
         "needs_update": stamp["needs_update"],
+        **cleanup_pending_metadata(target),
     }
     if stamp.get("legacy"):
         result["launch_supported"] = False
@@ -1224,13 +1707,13 @@ def read_existing_settings_if_managed(target: Path, state: dict[str, Any]) -> di
     )
 
 
-def current_managed_snapshot(target: Path, paths: tuple[Path, ...] = ALL_MANAGED_PATHS) -> dict[Path, bytes | None]:
-    snapshot: dict[Path, bytes | None] = {}
+def current_managed_snapshot(target: Path, paths: tuple[Path, ...] = ALL_MANAGED_PATHS) -> dict[Path, tuple[int, int] | None]:
+    snapshot: dict[Path, tuple[int, int] | None] = {}
     for relative in paths:
         path = target / relative
         if path.exists() or path.is_symlink():
-            content, _ = read_regular_file(path, f"managed file {relative}", owner_only=True)
-            snapshot[relative] = content
+            info = require_regular_file(path, f"managed file {relative}", owner_only=True)
+            snapshot[relative] = identity_of(info)
         else:
             snapshot[relative] = None
     return snapshot
@@ -1251,38 +1734,95 @@ def prune_empty_managed_dirs(target: Path, paths: tuple[Path, ...] = ALL_MANAGED
             directory = directory.parent
 
 
-def restore_snapshot(target: Path, snapshot: dict[Path, bytes | None]) -> None:
-    for relative in sorted(snapshot, key=lambda item: len(item.parts), reverse=True):
-        path = target / relative
-        if path.exists() or path.is_symlink():
-            path.unlink()
-    for relative, content in snapshot.items():
-        if content is None:
-            continue
-        path = ensure_private_parent(target, relative)
-        path.write_bytes(content)
-        path.chmod(OWNER_FILE_MODE)
-    prune_empty_managed_dirs(target, tuple(snapshot))
+def restore_snapshot(target: Path, snapshot: dict[Path, tuple[int, int] | None]) -> None:
+    del target, snapshot
+    fail("managed rollback requires held original objects and must not recreate files from bytes")
 
 
 def replace_managed_state(
     target: Path, desired: dict[Path, bytes | None], expected: dict[str, Any]
-) -> None:
-    del expected
-    for relative, content in desired.items():
-        path = ensure_private_parent(target, relative)
-        if content is None:
-            if path.exists() or path.is_symlink():
-                require_regular_file(path, f"managed file {relative}", owner_only=True)
-                path.unlink()
+) -> tuple[bool, dict[str, Any]]:
+    if expected.get("state") in {"managed", "legacy-managed"}:
+        stamp = load_stamp(target)
+        if stamp is None:
+            fail_concurrent("managed state disappeared before replacement")
+        validate_managed_files(target, stamp)
+    transaction_root = target / MANAGER_CONTROL_RELATIVE / "managed-transactions" / f"txn-{os.getpid()}-{time.time_ns()}"
+    hold_root = transaction_root / "held"
+    stage_root = transaction_root / "stage"
+    hold_root.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True)
+    stage_root.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True)
+    moved_old: list[Path] = []
+    installed_new: list[Path] = []
+    created_parents = sorted(
+        {(target / relative).parent for relative in desired},
+        key=lambda item: len(item.parts),
+        reverse=True,
+    )
+    try:
+        for relative, content in desired.items():
+            if content is None:
+                continue
+            staged = ensure_private_parent(stage_root, relative)
+            write_regular_file_atomic(staged, content, OWNER_FILE_MODE, f"staged managed file {relative}")
+        for relative in desired:
+            destination = target / relative
+            if path_present(destination):
+                require_regular_file(destination, f"managed file {relative}", owner_only=True)
+                held = ensure_private_parent(hold_root, relative)
+                os.replace(destination, held)
+                moved_old.append(relative)
+                sync_directory(destination.parent, f"managed file {relative} parent")
+                sync_directory(held.parent, f"held managed file {relative} parent")
+        for relative, content in desired.items():
+            if content is None:
+                continue
+            destination = ensure_private_parent(target, relative)
+            os.replace(stage_root / relative, destination)
+            destination.chmod(OWNER_FILE_MODE)
+            installed_new.append(relative)
+            sync_directory(destination.parent, f"managed file {relative} parent")
+        prune_empty_managed_dirs(target, tuple(desired))
+        post_state = inspect_target(target)
+        cleanup_created = publish_cleanup_pending_for_paths(
+            target,
+            [hold_root],
+            reason="managed-replacement",
+        )
+    except BaseException:
+        for relative in reversed(installed_new):
+            destination = target / relative
+            if path_present(destination):
+                require_regular_file(destination, f"new managed file {relative}", owner_only=True)
+                destination.unlink()
+                sync_directory(destination.parent, f"managed rollback parent {relative}")
+        for relative in reversed(moved_old):
+            held = hold_root / relative
+            if path_present(held):
+                destination = ensure_private_parent(target, relative)
+                os.replace(held, destination)
+                sync_directory(destination.parent, f"managed rollback parent {relative}")
+        prune_empty_managed_dirs(target, tuple(desired))
+        with contextlib.suppress(OSError):
+            cleanup_path(transaction_root)
+        raise
+    with contextlib.suppress(OSError):
+        cleanup_path(stage_root)
+    with contextlib.suppress(OSError):
+        transaction_root.rmdir()
+    cleanup_pending = False
+    if cleanup_created:
+        try:
+            drain_cleanup_pending(target)
+        except Exception:
+            cleanup_pending = True
+    for directory in created_parents:
+        if directory == target:
             continue
-        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
-            temporary = Path(handle.name)
-            handle.write(content)
-        temporary.chmod(OWNER_FILE_MODE)
-        os.replace(temporary, path)
-        path.chmod(OWNER_FILE_MODE)
-    prune_empty_managed_dirs(target, tuple(desired))
+        with contextlib.suppress(OSError):
+            if directory.is_dir() and not directory.is_symlink() and not any(directory.iterdir()):
+                directory.rmdir()
+    return cleanup_pending, post_state
 
 
 def changed_paths(target: Path, desired: dict[Path, bytes | None]) -> list[str]:
@@ -1374,7 +1914,7 @@ def validate_backup_envelope(
 ) -> None:
     require_exact_keys(envelope, BACKUP_KEYS, label)
     if (
-        envelope["schema_version"] != 1
+        envelope["schema_version"] != 2
         or envelope["product_name"] != PRODUCT_NAME
     ):
         fail(f"{label} schema or product identity is not compatible with this manager")
@@ -1401,6 +1941,25 @@ def validate_backup_envelope(
         relative = Path(raw_relative)
         if relative.is_absolute() or ".." in relative.parts or relative == Path(STAMP_NAME):
             fail(f"{label} contains an unsafe managed file path")
+    file_records = envelope["files"]
+    expected_payloads = [*raw_files, STAMP_NAME]
+    if not isinstance(file_records, list) or len(file_records) != len(expected_payloads):
+        fail(f"{label} file records are invalid")
+    seen_payloads: set[str] = set()
+    for record in file_records:
+        if not isinstance(record, dict):
+            fail(f"{label} file record must be an object")
+        require_exact_keys(record, {"path", "size", "sha256"}, f"{label} file record")
+        raw_path = record["path"]
+        if raw_path not in expected_payloads or raw_path in seen_payloads:
+            fail(f"{label} file record path is invalid")
+        seen_payloads.add(raw_path)
+        if not isinstance(record["size"], int) or record["size"] < 0:
+            fail(f"{label} file record size is invalid")
+        if not isinstance(record["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", record["sha256"]):
+            fail(f"{label} file record digest is invalid")
+    if seen_payloads != set(expected_payloads):
+        fail(f"{label} file record set is incomplete")
 
 
 def load_backup_envelope(
@@ -1422,6 +1981,20 @@ def load_backup_envelope(
         f"backup slot {slot} envelope",
         expected_slot=expected_slot,
     )
+    allowed_files = {BACKUP_NAME, *[*envelope["managed_files"], STAMP_NAME]}
+    observed_files: set[str] = set()
+    for child in sorted(slot_dir.rglob("*"), key=lambda item: str(item.relative_to(slot_dir))):
+        relative = str(child.relative_to(slot_dir))
+        info = child.lstat()
+        if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            fail(f"backup slot {slot} contains an unsafe entry")
+        if relative not in allowed_files:
+            fail(f"backup slot {slot} contains an unrecorded entry")
+        observed_files.add(relative)
+    if observed_files != allowed_files:
+        fail(f"backup slot {slot} file set does not match its envelope")
     return envelope
 
 
@@ -1454,36 +2027,61 @@ def refresh_backup_slot_numbers(target: Path, pool: Path) -> None:
 
 def create_backup(target: Path, state: dict[str, Any]) -> int:
     pool = ensure_backup_pool(target)
-    for slot in sorted(backup_slots_for_rotation(target, pool), reverse=True):
+    slots = backup_slots_for_rotation(target, pool)
+    retired_paths = [pool / "9"] if 9 in slots else []
+    cleanup_created = publish_cleanup_pending_for_paths(
+        target,
+        retired_paths,
+        reason="backup-rotation",
+    )
+    if cleanup_created:
+        drain_cleanup_pending(target)
+    for slot in sorted((slot for slot in slots if slot != 9), reverse=True):
         current = pool / str(slot)
-        if slot == 9:
-            # The slot was just validated as a target-bound manager backup.
-            shutil.rmtree(current)
-        else:
-            os.replace(current, pool / str(slot + 1))
-    slot_dir = pool / "0"
-    slot_dir.mkdir(mode=OWNER_DIRECTORY_MODE)
-    managed_files = list(state["managed_files"])
-    for raw_relative in [*managed_files, STAMP_NAME]:
-        relative = Path(raw_relative)
-        content, _ = read_regular_file(
-            target / relative, f"managed file {relative}", owner_only=True
-        )
-        destination = ensure_private_parent(slot_dir, relative)
-        destination.write_bytes(content)
-        destination.chmod(OWNER_FILE_MODE)
-    envelope = {
-        "schema_version": 1,
-        "product_name": PRODUCT_NAME,
-        "build_version": VERSION,
-        "slot": 0,
-        "canonical_target": str(target),
-        "source_setup_id": state["setup_id"],
-        "managed_files": managed_files,
-        "created_at": int(time.time()),
-    }
-    (slot_dir / BACKUP_NAME).write_bytes(canonical_json(envelope))
-    (slot_dir / BACKUP_NAME).chmod(OWNER_FILE_MODE)
+        os.replace(current, pool / str(slot + 1))
+    stage_dir = pool / f".stage-0-{os.getpid()}-{time.time_ns()}"
+    stage_dir.mkdir(mode=OWNER_DIRECTORY_MODE)
+    stage_dir.chmod(OWNER_DIRECTORY_MODE)
+    published = False
+    try:
+        managed_files = list(state["managed_files"])
+        file_records: list[dict[str, Any]] = []
+        for raw_relative in [*managed_files, STAMP_NAME]:
+            relative = Path(raw_relative)
+            content, _ = read_regular_file(
+                target / relative, f"managed file {relative}", owner_only=True
+            )
+            destination = ensure_private_parent(stage_dir, relative)
+            destination.write_bytes(content)
+            destination.chmod(OWNER_FILE_MODE)
+            file_records.append(
+                {
+                    "path": str(relative),
+                    "size": len(content),
+                    "sha256": sha256_bytes(content),
+                }
+            )
+        envelope = {
+            "schema_version": 2,
+            "product_name": PRODUCT_NAME,
+            "build_version": VERSION,
+            "slot": 0,
+            "canonical_target": str(target),
+            "source_setup_id": state["setup_id"],
+            "managed_files": managed_files,
+            "files": file_records,
+            "created_at": int(time.time()),
+        }
+        (stage_dir / BACKUP_NAME).write_bytes(canonical_json(envelope))
+        (stage_dir / BACKUP_NAME).chmod(OWNER_FILE_MODE)
+        load_backup_envelope(target, stage_dir, 0, expected_slot=0)
+        os.replace(stage_dir, pool / "0")
+        published = True
+    finally:
+        if not published:
+            with contextlib.suppress(OSError):
+                cleanup_path(stage_dir)
+    sync_directory(pool, "backup pool")
     refresh_backup_slot_numbers(target, pool)
     return 0
 
@@ -1494,6 +2092,7 @@ def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[Path, byt
     pool = require_backup_pool(target)
     slot_dir = pool / str(slot)
     envelope = load_backup_envelope(target, slot_dir, slot, expected_slot=slot)
+    file_records = {record["path"]: record for record in envelope["files"]}
     files: dict[Path, bytes] = {}
     for raw_relative in [*envelope["managed_files"], STAMP_NAME]:
         relative = Path(raw_relative)
@@ -1502,12 +2101,37 @@ def load_backup(target: Path, slot: int) -> tuple[dict[str, Any], dict[Path, byt
         content, _ = read_regular_file(
             slot_dir / relative, f"backup file {relative}", owner_only=True
         )
+        record = file_records[str(relative)]
+        if record["size"] != len(content) or record["sha256"] != sha256_bytes(content):
+            fail(f"backup file {relative} digest mismatch")
         files[relative] = content
     return envelope, files
 
 
+def backup_pool_present(target: Path) -> bool:
+    return path_present(backup_pool(target)) or path_present(legacy_backup_pool(target))
+
+
+def rollback_created_backup_pool(
+    target: Path,
+    *,
+    existed_before: bool,
+    target_metadata: dict[str, Any] | None,
+) -> None:
+    if existed_before:
+        return
+    pool = backup_pool(target)
+    if path_present(pool):
+        remove_tree_no_follow(pool)
+        sync_directory(target, "backup rollback target")
+    restore_directory_metadata(target, target_metadata)
+
+
 def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -> dict[str, Any]:
-    with locked_new_or_existing_target(target) as canonical_target:
+    with locked_new_or_existing_target_with_creation(
+        target
+    ) as (canonical_target, created_target, parent_snapshot):
+        cleanup_drained = drain_or_recover_cleanup_before_mutation(canonical_target)
         state = inspect_target(canonical_target)
         if state["state"] == "legacy-managed":
             fail("legacy managed targets must be migrated, restored, or removed before launch")
@@ -1523,15 +2147,24 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
         desired[Path(STAMP_NAME)] = canonical_json(stamp)
         changed = changed_paths(canonical_target, desired)
         backup_slot: int | None = None
-        snapshot = current_managed_snapshot(canonical_target)
+        backup_existed = backup_pool_present(canonical_target)
+        backup_target_metadata = directory_metadata(canonical_target) if changed else None
+        cleanup_pending = False
         try:
             if state["state"] == "managed" and changed:
                 backup_slot = create_backup(canonical_target, state)
             if changed:
-                replace_managed_state(canonical_target, desired, stamp)
-            post = inspect_target(canonical_target)
+                cleanup_pending, post = replace_managed_state(canonical_target, desired, state)
+            else:
+                post = inspect_target(canonical_target)
         except BaseException:
-            restore_snapshot(canonical_target, snapshot)
+            rollback_created_backup_pool(
+                canonical_target,
+                existed_before=backup_existed,
+                target_metadata=backup_target_metadata,
+            )
+            if created_target:
+                remove_created_target_tree(canonical_target, parent_snapshot)
             raise
     return {
         "ok": True,
@@ -1543,6 +2176,8 @@ def mutate_setup(target: Path, setup_id: str, profile_id: str, operation: str) -
         "changed": changed,
         "backup_slot": backup_slot,
         "state": post["state"],
+        "cleanup_drained": cleanup_drained,
+        "cleanup_pending": cleanup_pending,
     }
 
 
@@ -1582,6 +2217,7 @@ def plan_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
             "profile_id": profile_id,
             "target": str(canonical_target),
             "state": state["state"],
+            "cleanup_pending": state.get("cleanup_pending", False),
             "mutates": False,
             "backup_required": backup_required,
             "changed": changed,
@@ -1590,6 +2226,7 @@ def plan_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
 
 def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any]:
     with locked_existing_target(target) as canonical_target:
+        cleanup_drained = drain_or_recover_cleanup_before_mutation(canonical_target)
         state = inspect_target(canonical_target)
         if state["state"] != "legacy-managed":
             fail("target does not contain legacy nddev-cline-app managed state")
@@ -1603,13 +2240,18 @@ def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any
             if relative != Path(STAMP_NAME) and relative not in desired:
                 desired[relative] = None
         changed = changed_paths(canonical_target, desired)
-        snapshot = current_managed_snapshot(canonical_target)
+        backup_existed = backup_pool_present(canonical_target)
+        backup_target_metadata = directory_metadata(canonical_target)
+        cleanup_pending = False
         try:
             backup_slot = create_backup(canonical_target, state)
-            replace_managed_state(canonical_target, desired, stamp)
-            post = inspect_target(canonical_target)
+            cleanup_pending, post = replace_managed_state(canonical_target, desired, state)
         except BaseException:
-            restore_snapshot(canonical_target, snapshot)
+            rollback_created_backup_pool(
+                canonical_target,
+                existed_before=backup_existed,
+                target_metadata=backup_target_metadata,
+            )
             raise
     return {
         "ok": True,
@@ -1621,22 +2263,31 @@ def migrate_setup(target: Path, setup_id: str, profile_id: str) -> dict[str, Any
         "changed": changed,
         "backup_slot": backup_slot,
         "state": post["state"],
+        "cleanup_drained": cleanup_drained,
+        "cleanup_pending": cleanup_pending,
     }
 
 
 def remove_setup(target: Path) -> dict[str, Any]:
     with locked_existing_target(target) as canonical_target:
+        cleanup_drained = drain_or_recover_cleanup_before_mutation(canonical_target)
         state = inspect_target(canonical_target)
         if state["state"] not in {"managed", "legacy-managed"}:
             fail("target is not managed by nddev-cline-app")
-        snapshot = current_managed_snapshot(canonical_target)
         state_paths = tuple(Path(raw) for raw in [*state["managed_files"], STAMP_NAME])
         desired = {relative: None for relative in state_paths}
+        backup_existed = backup_pool_present(canonical_target)
+        backup_target_metadata = directory_metadata(canonical_target)
+        cleanup_pending = False
         try:
             backup_slot = create_backup(canonical_target, state)
-            replace_managed_state(canonical_target, desired, {})
+            cleanup_pending, _post = replace_managed_state(canonical_target, desired, state)
         except BaseException:
-            restore_snapshot(canonical_target, snapshot)
+            rollback_created_backup_pool(
+                canonical_target,
+                existed_before=backup_existed,
+                target_metadata=backup_target_metadata,
+            )
             raise
     return {
         "ok": True,
@@ -1644,11 +2295,14 @@ def remove_setup(target: Path) -> dict[str, Any]:
         "target": str(canonical_target),
         "removed_setup_id": state["setup_id"],
         "backup_slot": backup_slot,
+        "cleanup_drained": cleanup_drained,
+        "cleanup_pending": cleanup_pending,
     }
 
 
 def restore_backup(target: Path, slot: int) -> dict[str, Any]:
     with locked_existing_target(target) as canonical_target:
+        cleanup_drained = drain_or_recover_cleanup_before_mutation(canonical_target)
         state = inspect_target(canonical_target)
         if state["state"] not in {"managed", "legacy-managed"}:
             fail("target is not managed by nddev-cline-app")
@@ -1657,12 +2311,10 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
             relative = Path(raw_relative)
             if relative not in desired:
                 desired[relative] = None
-        snapshot = current_managed_snapshot(canonical_target)
+        cleanup_pending = False
         try:
-            replace_managed_state(canonical_target, desired, {})
-            post = inspect_target(canonical_target)
+            cleanup_pending, post = replace_managed_state(canonical_target, desired, state)
         except BaseException:
-            restore_snapshot(canonical_target, snapshot)
             raise
     return {
         "ok": True,
@@ -1673,6 +2325,8 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
         "state": post["state"],
         "restored_from_slot": slot,
         "restored_source_setup_id": envelope["source_setup_id"],
+        "cleanup_drained": cleanup_drained,
+        "cleanup_pending": cleanup_pending,
     }
 
 
@@ -1758,9 +2412,47 @@ def cline_executable(target: Path) -> Path:
 
 
 def require_supported_runtime_platform() -> None:
-    if sys.platform.startswith(("darwin", "linux")):
-        return
-    fail(f"{PRODUCT_NAME} {VERSION} supports Cline CLI launch/install only on macOS and Linux")
+    current_product_host_id()
+
+
+def current_machine_arch() -> str:
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        return "arm64"
+    if machine in {"x86_64", "amd64"}:
+        return "x64"
+    fail(f"{PRODUCT_NAME} {VERSION} does not support this CPU architecture: {machine}")
+
+
+def current_linux_distribution() -> dict[str, str]:
+    data: dict[str, str] = {}
+    try:
+        content = Path("/etc/os-release").read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"{PRODUCT_NAME} {VERSION} requires Ubuntu on Linux; cannot read /etc/os-release: {exc}")
+    for line in content.splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        data[key] = value.strip().strip('"')
+    return data
+
+
+def current_product_host_id() -> str:
+    arch = current_machine_arch()
+    if sys.platform.startswith("darwin"):
+        return f"macos-{arch}"
+    if sys.platform.startswith("linux"):
+        distro = current_linux_distribution()
+        distro_id = distro.get("ID", "").lower()
+        id_like = {item.lower() for item in distro.get("ID_LIKE", "").split()}
+        if distro_id != "ubuntu" and "ubuntu" not in id_like:
+            fail(f"{PRODUCT_NAME} {VERSION} supports Cline CLI launch/install only on Ubuntu glibc hosts")
+        libc_name, _libc_version = platform.libc_ver()
+        if libc_name and libc_name.lower() != "glibc":
+            fail(f"{PRODUCT_NAME} {VERSION} supports Cline CLI launch/install only on Ubuntu glibc hosts")
+        return f"ubuntu-glibc-{arch}"
+    fail(f"{PRODUCT_NAME} {VERSION} supports Cline CLI launch/install only on macOS and Ubuntu glibc")
 
 
 def path_is_relative_to(path: Path, parent: Path) -> bool:
@@ -2170,6 +2862,679 @@ def path_present(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
+def cleanup_parent(target: Path) -> Path:
+    return target / CLEANUP_PARENT_RELATIVE
+
+
+def cleanup_tombstones(target: Path) -> Path:
+    return target / CLEANUP_TOMBSTONES_RELATIVE
+
+
+def cleanup_pending_path(target: Path) -> Path:
+    return cleanup_parent(target) / CLEANUP_PENDING_NAME
+
+
+def cleanup_intent_paths(target: Path) -> list[Path]:
+    parent = cleanup_parent(target)
+    if not path_present(parent):
+        return []
+    return sorted(
+        (child for child in parent.iterdir() if child.name.startswith(CLEANUP_INTENT_PREFIX)),
+        key=lambda item: item.name,
+    )
+
+
+def relative_under(path: Path, parent: Path, label: str) -> Path:
+    try:
+        relative = path.relative_to(parent)
+    except ValueError:
+        fail(f"{label} escapes its declared parent")
+    if relative == Path(".") or relative.is_absolute() or ".." in relative.parts:
+        fail(f"{label} has an unsafe relative path")
+    return relative
+
+
+def directory_metadata(path: Path) -> dict[str, Any]:
+    info = require_directory(path, "directory metadata snapshot")
+    return {
+        "mode": stat.S_IMODE(info.st_mode),
+        "atime_ns": info.st_atime_ns,
+        "mtime_ns": info.st_mtime_ns,
+        "dev": info.st_dev,
+        "ino": info.st_ino,
+    }
+
+
+def restore_directory_metadata(path: Path, snapshot: dict[str, Any] | None) -> None:
+    if snapshot is None:
+        return
+    info = require_directory(path, "directory metadata restore")
+    if identity_of(info) != (snapshot["dev"], snapshot["ino"]):
+        fail("directory identity changed during rollback")
+    os.chmod(path, int(snapshot["mode"]))
+    os.utime(path, ns=(int(snapshot["atime_ns"]), int(snapshot["mtime_ns"])), follow_symlinks=False)
+
+
+def remove_created_target_tree(target: Path, parent_snapshot: dict[str, Any] | None) -> None:
+    if path_present(target):
+        make_tree_owner_writable(target)
+        remove_tree_no_follow(target)
+        sync_directory(target.parent, "created target parent")
+    restore_directory_metadata(target.parent, parent_snapshot)
+
+
+def make_tree_owner_writable(root: Path) -> None:
+    if not path_present(root):
+        return
+    paths = [root]
+    if root.is_dir() and not root.is_symlink():
+        paths.extend(sorted(root.rglob("*"), key=lambda item: len(item.parts)))
+    for path in paths:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            fail("rollback tree must not contain symlinks")
+        if stat.S_ISDIR(info.st_mode):
+            os.chmod(path, OWNER_DIRECTORY_MODE)
+        elif stat.S_ISREG(info.st_mode):
+            os.chmod(path, OWNER_FILE_MODE if not (stat.S_IMODE(info.st_mode) & stat.S_IXUSR) else OWNER_EXECUTABLE_MODE)
+        else:
+            fail("rollback tree must not contain special files")
+
+
+def cleanup_entry_snapshot(root: Path) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    if not path_present(root):
+        fail("cleanup tombstone is missing")
+    paths = [root]
+    if root.is_dir() and not root.is_symlink():
+        paths.extend(sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root))))
+    if len(paths) > CLEANUP_MAX_ENTRIES:
+        fail("cleanup tombstone exceeds the entry bound")
+    total_bytes = 0
+    for path in paths:
+        info = path.lstat()
+        relative = "." if path == root else str(path.relative_to(root))
+        mode = stat.S_IMODE(info.st_mode)
+        record: dict[str, Any] = {
+            "relative": relative,
+            "mode": mode,
+            "uid": owner_of(info),
+            "nlink": info.st_nlink,
+            "dev": info.st_dev,
+            "ino": info.st_ino,
+            "size": info.st_size,
+            "mtime_ns": info.st_mtime_ns,
+        }
+        if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            record["kind"] = "directory"
+        elif stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+            if info.st_nlink != 1:
+                fail("cleanup tombstone file must not have hard-link aliases")
+            content, _ = read_regular_file(path, f"cleanup tombstone file {relative}")
+            total_bytes += len(content)
+            if total_bytes > SOFTWARE_TREE_MAX_BYTES:
+                fail("cleanup tombstone exceeds the byte bound")
+            record["kind"] = "file"
+            record["sha256"] = sha256_bytes(content)
+        elif stat.S_ISLNK(info.st_mode):
+            fail("cleanup tombstone must not contain symlinks")
+        else:
+            fail("cleanup tombstone must not contain special files")
+        entries.append(record)
+    return entries
+
+
+def validate_cleanup_snapshot_schema(snapshot: Any, label: str) -> list[dict[str, Any]]:
+    if not isinstance(snapshot, list) or not snapshot:
+        fail(f"{label} snapshot is invalid")
+    if len(snapshot) > CLEANUP_MAX_ENTRIES:
+        fail(f"{label} snapshot exceeds the entry bound")
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for record in snapshot:
+        if not isinstance(record, dict):
+            fail(f"{label} snapshot entry must be an object")
+        kind = record.get("kind")
+        expected_keys = {
+            "relative",
+            "kind",
+            "mode",
+            "uid",
+            "nlink",
+            "dev",
+            "ino",
+            "size",
+            "mtime_ns",
+        }
+        if kind == "file":
+            expected_keys.add("sha256")
+        require_exact_keys(record, expected_keys, f"{label} snapshot entry")
+        relative = record["relative"]
+        if not isinstance(relative, str) or relative in seen:
+            fail(f"{label} snapshot relative path is invalid")
+        if relative != ".":
+            relative_path = Path(relative)
+            if relative_path.is_absolute() or ".." in relative_path.parts or relative_path == Path("."):
+                fail(f"{label} snapshot relative path is unsafe")
+        seen.add(relative)
+        if kind not in {"directory", "file"}:
+            fail(f"{label} snapshot kind is invalid")
+        for key in ("mode", "uid", "nlink", "dev", "ino", "size", "mtime_ns"):
+            if not isinstance(record[key], int) or record[key] < 0:
+                fail(f"{label} snapshot {key} is invalid")
+        if kind == "file":
+            if record["nlink"] != 1:
+                fail(f"{label} snapshot file must not have hard-link aliases")
+            if not isinstance(record["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", record["sha256"]):
+                fail(f"{label} snapshot digest is invalid")
+        result.append(record)
+    if "." not in seen:
+        fail(f"{label} snapshot root entry is missing")
+    return result
+
+
+def cleanup_snapshot_map(snapshot: list[dict[str, Any]], label: str) -> dict[str, dict[str, Any]]:
+    records = validate_cleanup_snapshot_schema(snapshot, label)
+    return {str(record["relative"]): record for record in records}
+
+
+def cleanup_source_allowed(relative: Path) -> bool:
+    if relative.is_absolute() or ".." in relative.parts or relative == Path("."):
+        return False
+    parts = relative.parts
+    if parts[:2] == (".nddev-cline-control", "managed-transactions"):
+        return True
+    if parts[:2] == (".nddev-cline-control", "software-transactions"):
+        return True
+    if len(parts) == 2 and parts[0] == ".nddev-cline-backups" and parts[1].isdigit():
+        slot = int(parts[1])
+        return 0 <= slot <= 9
+    return False
+
+
+def validate_cleanup_record(
+    path: Path,
+    record: dict[str, Any],
+    label: str,
+    *,
+    strict_directory_metadata: bool,
+) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail(f"{label} is missing")
+    if stat.S_ISLNK(info.st_mode):
+        fail(f"{label} must not be a symlink")
+    kind = record["kind"]
+    if kind == "file":
+        if not stat.S_ISREG(info.st_mode):
+            fail(f"{label} kind changed")
+        if info.st_nlink != 1:
+            fail(f"{label} must not have hard-link aliases")
+        content, _ = read_regular_file(path, label)
+        observed: dict[str, Any] = {
+            "kind": "file",
+            "mode": stat.S_IMODE(info.st_mode),
+            "uid": owner_of(info),
+            "nlink": info.st_nlink,
+            "dev": info.st_dev,
+            "ino": info.st_ino,
+            "size": info.st_size,
+            "mtime_ns": info.st_mtime_ns,
+            "sha256": sha256_bytes(content),
+        }
+    elif kind == "directory":
+        if not stat.S_ISDIR(info.st_mode):
+            fail(f"{label} kind changed")
+        observed = {
+            "kind": "directory",
+            "mode": stat.S_IMODE(info.st_mode),
+            "uid": owner_of(info),
+            "dev": info.st_dev,
+            "ino": info.st_ino,
+        }
+        if strict_directory_metadata:
+            observed.update(
+                {
+                    "nlink": info.st_nlink,
+                    "size": info.st_size,
+                    "mtime_ns": info.st_mtime_ns,
+                }
+            )
+    else:
+        fail(f"{label} snapshot kind is invalid")
+    for key, value in observed.items():
+        if record[key] != value:
+            fail(f"{label} identity changed")
+
+
+def validate_cleanup_tree_against_snapshot(
+    root: Path,
+    snapshot: list[dict[str, Any]],
+    label: str,
+    *,
+    allow_missing: bool,
+    strict_directory_metadata: bool,
+) -> None:
+    records = cleanup_snapshot_map(snapshot, label)
+    if not path_present(root):
+        if allow_missing:
+            return
+        fail(f"{label} is missing")
+    observed: set[str] = set()
+    paths = [root]
+    if root.is_dir() and not root.is_symlink():
+        paths.extend(sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root))))
+    for path in paths:
+        relative = "." if path == root else str(path.relative_to(root))
+        if relative not in records:
+            fail(f"{label} contains an undeclared path")
+        observed.add(relative)
+        validate_cleanup_record(
+            path,
+            records[relative],
+            f"{label} object {relative}",
+            strict_directory_metadata=strict_directory_metadata,
+        )
+    if not allow_missing and observed != set(records):
+        fail(f"{label} is incomplete")
+
+
+def remove_cleanup_tree_from_snapshot(root: Path, snapshot: list[dict[str, Any]], label: str) -> None:
+    records = cleanup_snapshot_map(snapshot, label)
+    validate_cleanup_tree_against_snapshot(
+        root,
+        snapshot,
+        label,
+        allow_missing=True,
+        strict_directory_metadata=False,
+    )
+    for relative in sorted(records, key=lambda item: len(Path(item).parts), reverse=True):
+        path = root if relative == "." else root / relative
+        if not path_present(path):
+            continue
+        record = records[relative]
+        validate_cleanup_record(
+            path,
+            record,
+            f"{label} object {relative}",
+            strict_directory_metadata=False,
+        )
+        if record["kind"] == "file":
+            path.unlink()
+        elif record["kind"] == "directory":
+            undeclared = [
+                child.name
+                for child in path.iterdir()
+                if str(child.relative_to(root)) not in records
+            ]
+            if undeclared:
+                fail(f"{label} directory contains an undeclared child")
+            path.rmdir()
+
+
+def cleanup_journal_payload(
+    target: Path,
+    *,
+    reason: str,
+    entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "schema_version": CLEANUP_SCHEMA_VERSION,
+        "product_name": PRODUCT_NAME,
+        "build_version": VERSION,
+        "canonical_target": str(target),
+        "cleanup_parent": str(CLEANUP_PARENT_RELATIVE),
+        "reason": reason,
+        "entries": entries,
+    }
+
+
+def validate_cleanup_journal(target: Path, journal: dict[str, Any], label: str) -> list[dict[str, Any]]:
+    require_exact_keys(
+        journal,
+        {
+            "schema_version",
+            "product_name",
+            "build_version",
+            "canonical_target",
+            "cleanup_parent",
+            "reason",
+            "entries",
+        },
+        label,
+    )
+    if (
+        journal["schema_version"] != CLEANUP_SCHEMA_VERSION
+        or journal["product_name"] != PRODUCT_NAME
+        or journal["canonical_target"] != str(target)
+        or journal["cleanup_parent"] != str(CLEANUP_PARENT_RELATIVE)
+    ):
+        fail(f"{label} is not bound to this target")
+    if not isinstance(journal["build_version"], str) or not isinstance(journal["reason"], str):
+        fail(f"{label} metadata is invalid")
+    entries = journal["entries"]
+    if not isinstance(entries, list) or len(entries) > CLEANUP_MAX_ENTRIES:
+        fail(f"{label} entries are invalid")
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            fail(f"{label} entry must be an object")
+        require_exact_keys(entry, {"name", "source", "destination", "snapshot"}, f"{label} entry")
+        name = entry["name"]
+        source = entry["source"]
+        destination = entry["destination"]
+        snapshot = entry["snapshot"]
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"tombstone-[a-f0-9]{16}", name)
+            or name in seen
+        ):
+            fail(f"{label} tombstone name is invalid")
+        seen.add(name)
+        relative = Path(str(source))
+        if not cleanup_source_allowed(relative):
+            fail(f"{label} source path is unsafe")
+        destination_relative = Path(str(destination))
+        if destination_relative != CLEANUP_TOMBSTONES_RELATIVE / name:
+            fail(f"{label} destination path is invalid")
+        validate_cleanup_snapshot_schema(snapshot, f"{label} entry {name}")
+    return entries
+
+
+def load_cleanup_pending(target: Path, *, read_only: bool) -> dict[str, Any] | None:
+    parent = cleanup_parent(target)
+    if not path_present(parent):
+        return None
+    require_private_directory(parent, "cleanup parent")
+    allowed = {CLEANUP_PENDING_NAME, "tombstones"}
+    intent_paths: list[Path] = []
+    for child in parent.iterdir():
+        if child.name.startswith(CLEANUP_INTENT_PREFIX):
+            intent_paths.append(child)
+            continue
+        if child.name.startswith(f".{CLEANUP_PENDING_NAME}.publish-"):
+            fail("cleanup journal publication is incomplete")
+        if child.name not in allowed:
+            fail("cleanup parent contains an unmanaged path")
+    pending = cleanup_pending_path(target)
+    if not path_present(pending):
+        if intent_paths:
+            fail("cleanup recovery intent exists; run a mutating command to recover")
+        tombstones = cleanup_tombstones(target)
+        if path_present(tombstones) and any(tombstones.iterdir()):
+            fail("cleanup tombstones exist without a pending journal")
+        return None
+    info = require_regular_file(pending, "cleanup pending journal", owner_only=True)
+    if read_only and info.st_nlink != 1:
+        fail("cleanup pending journal publication is incomplete")
+    journal = load_json_object(pending, "cleanup pending journal", owner_only=True)
+    entries = validate_cleanup_journal(target, journal, "cleanup pending journal")
+    tombstones = cleanup_tombstones(target)
+    require_private_directory(tombstones, "cleanup tombstone parent")
+    expected_names = sorted(str(entry["name"]) for entry in entries)
+    actual_names = sorted(child.name for child in tombstones.iterdir())
+    if any(name not in expected_names for name in actual_names):
+        fail("cleanup tombstone set does not match the pending journal")
+    for entry in entries:
+        if path_present(target / Path(str(entry["source"]))):
+            fail("cleanup pending journal still has a live source path")
+        tombstone = target / Path(str(entry["destination"]))
+        if path_present(tombstone):
+            validate_cleanup_tree_against_snapshot(
+                tombstone,
+                entry["snapshot"],
+                "cleanup pending tombstone",
+                allow_missing=True,
+                strict_directory_metadata=False,
+            )
+    for intent_path in intent_paths:
+        intent = load_cleanup_intent(target, intent_path)
+        intent_entries = validate_cleanup_journal(target, intent, "cleanup recovery intent")
+        if intent["reason"] != journal["reason"] or intent_entries != entries:
+            fail("cleanup recovery intent does not match the pending journal")
+    return journal
+
+
+def cleanup_pending_metadata(target: Path) -> dict[str, Any]:
+    journal = load_cleanup_pending(target, read_only=True)
+    if journal is None:
+        return {"cleanup_pending": False}
+    return {
+        "cleanup_pending": True,
+        "cleanup_reason": journal["reason"],
+        "cleanup_entries": len(journal["entries"]),
+    }
+
+
+def load_cleanup_intent(target: Path, intent_path: Path) -> dict[str, Any]:
+    intent = load_json_object(intent_path, "cleanup recovery intent", owner_only=True)
+    validate_cleanup_journal(target, intent, "cleanup recovery intent")
+    return intent
+
+
+def recover_cleanup_pending_publication_alias(target: Path) -> bool:
+    pending = cleanup_pending_path(target)
+    if not path_present(pending):
+        return False
+    info = require_regular_file(pending, "cleanup pending journal", owner_only=True)
+    if info.st_nlink == 1:
+        return False
+    if info.st_nlink != 2:
+        fail("cleanup pending journal publication is incomplete")
+    parent = pending.parent
+    aliases: list[Path] = []
+    for child in parent.iterdir():
+        if not child.name.startswith(f".{CLEANUP_PENDING_NAME}.publish-"):
+            continue
+        child_info = child.lstat()
+        if stat.S_ISREG(child_info.st_mode) and identity_of(child_info) == identity_of(info):
+            aliases.append(child)
+        else:
+            fail("cleanup journal has an unknown publication alias")
+    if len(aliases) != 1:
+        fail("cleanup journal publication is incomplete")
+    aliases[0].unlink()
+    sync_directory(parent, "cleanup parent")
+    require_regular_file(pending, "cleanup pending journal", owner_only=True)
+    return True
+
+
+def recover_cleanup_intents(target: Path) -> bool:
+    recovered = False
+    for intent_path in cleanup_intent_paths(target):
+        intent = load_cleanup_intent(target, intent_path)
+        pending = cleanup_pending_path(target)
+        if path_present(pending):
+            journal = load_cleanup_pending(target, read_only=False)
+            if journal is None or journal["entries"] != intent["entries"]:
+                fail("cleanup recovery intent does not match the pending journal")
+            intent_path.unlink()
+            sync_directory(intent_path.parent, "cleanup parent")
+            recovered = True
+            continue
+        for entry in reversed(intent["entries"]):
+            source_relative = Path(str(entry["source"]))
+            source = target / source_relative
+            tombstone = target / Path(str(entry["destination"]))
+            snapshot = entry["snapshot"]
+            source_exists = path_present(source)
+            tombstone_exists = path_present(tombstone)
+            if source_exists and tombstone_exists:
+                fail("cleanup recovery intent has both source and tombstone present")
+            if not source_exists and tombstone_exists:
+                validate_cleanup_tree_against_snapshot(
+                    tombstone,
+                    snapshot,
+                    "cleanup recovery tombstone",
+                    allow_missing=False,
+                    strict_directory_metadata=True,
+                )
+                source.parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+                os.replace(tombstone, source)
+                sync_directory(source.parent, "cleanup recovery source parent")
+                sync_directory(tombstone.parent, "cleanup recovery tombstone parent")
+                recovered = True
+            elif source_exists:
+                validate_cleanup_tree_against_snapshot(
+                    source,
+                    snapshot,
+                    "cleanup recovery source",
+                    allow_missing=False,
+                    strict_directory_metadata=True,
+                )
+            else:
+                fail("cleanup recovery intent lost both source and tombstone")
+        intent_path.unlink()
+        sync_directory(intent_path.parent, "cleanup parent")
+        recovered = True
+    for directory in (cleanup_tombstones(target), cleanup_parent(target), target / MANAGER_CONTROL_RELATIVE):
+        with contextlib.suppress(OSError):
+            if path_present(directory) and directory.is_dir() and not directory.is_symlink():
+                directory.rmdir()
+                sync_directory(directory.parent, "cleanup parent")
+    return recovered
+
+
+def drain_or_recover_cleanup_before_mutation(target: Path) -> bool:
+    recovered = recover_cleanup_intents(target)
+    alias_recovered = recover_cleanup_pending_publication_alias(target)
+    drained = drain_cleanup_pending(target)
+    return recovered or alias_recovered or drained
+
+
+def remove_tree_no_follow(path: Path) -> None:
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        fail("cleanup must not remove symlinks")
+    if stat.S_ISREG(info.st_mode):
+        if info.st_nlink != 1:
+            fail("cleanup file must not have hard-link aliases")
+        path.unlink()
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        fail("cleanup must not remove special files")
+    for child in sorted(path.iterdir(), key=lambda item: item.name):
+        remove_tree_no_follow(child)
+    path.rmdir()
+
+
+def drain_cleanup_pending(target: Path) -> bool:
+    journal = load_cleanup_pending(target, read_only=False)
+    if journal is None:
+        return False
+    entries = validate_cleanup_journal(target, journal, "cleanup pending journal")
+    for entry in entries:
+        tombstone = target / Path(str(entry["destination"]))
+        if path_present(tombstone):
+            remove_cleanup_tree_from_snapshot(
+                tombstone,
+                entry["snapshot"],
+                f"cleanup tombstone {entry['name']}",
+            )
+            sync_directory(tombstone.parent, "cleanup tombstone parent")
+    pending = cleanup_pending_path(target)
+    pending.unlink()
+    sync_directory(pending.parent, "cleanup parent")
+    for directory in (cleanup_tombstones(target), cleanup_parent(target), target / MANAGER_CONTROL_RELATIVE):
+        with contextlib.suppress(OSError):
+            if path_present(directory) and directory.is_dir() and not directory.is_symlink():
+                directory.rmdir()
+                sync_directory(directory.parent, "cleanup parent")
+    return True
+
+
+def publish_cleanup_pending_for_paths(target: Path, sources: list[Path], *, reason: str) -> bool:
+    existing = [source for source in sources if path_present(source)]
+    if not existing:
+        return False
+    parent = cleanup_parent(target)
+    tombstones = cleanup_tombstones(target)
+    parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    parent.chmod(OWNER_DIRECTORY_MODE)
+    tombstones.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    tombstones.chmod(OWNER_DIRECTORY_MODE)
+    if path_present(cleanup_pending_path(target)):
+        fail("cleanup pending state already exists")
+    if cleanup_intent_paths(target):
+        fail("cleanup recovery intent already exists")
+    entries: list[dict[str, Any]] = []
+    for index, source in enumerate(existing):
+        source_relative = relative_under(source, target, "cleanup source")
+        if not cleanup_source_allowed(source_relative):
+            fail("cleanup source path is not allowlisted for this operation")
+        name_seed = f"{time.time_ns()}-{os.getpid()}-{index}-{source_relative}"
+        tombstone_name = f"tombstone-{hashlib.sha256(name_seed.encode('utf-8')).hexdigest()[:16]}"
+        destination = CLEANUP_TOMBSTONES_RELATIVE / tombstone_name
+        snapshot = cleanup_entry_snapshot(source)
+        entries.append(
+            {
+                "name": tombstone_name,
+                "source": str(source_relative),
+                "destination": str(destination),
+                "snapshot": snapshot,
+            }
+        )
+    intent = cleanup_journal_payload(target, reason=reason, entries=entries)
+    validate_cleanup_journal(target, intent, "cleanup recovery intent")
+    intent_path = parent / f"{CLEANUP_INTENT_PREFIX}{os.getpid()}-{time.time_ns()}.json"
+    publish_regular_file_no_replace(
+        intent_path,
+        canonical_json(intent),
+        "cleanup recovery intent",
+    )
+    for entry in entries:
+        source = target / Path(str(entry["source"]))
+        tombstone = target / Path(str(entry["destination"]))
+        tombstone.parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+        if path_present(tombstone):
+            fail("cleanup tombstone destination already exists")
+        validate_cleanup_tree_against_snapshot(
+            source,
+            entry["snapshot"],
+            "cleanup source before retirement",
+            allow_missing=False,
+            strict_directory_metadata=True,
+        )
+        os.replace(source, tombstone)
+        sync_directory(source.parent, "cleanup source parent")
+        sync_directory(tombstone.parent, "cleanup tombstone parent")
+        validate_cleanup_tree_against_snapshot(
+            tombstone,
+            entry["snapshot"],
+            "cleanup tombstone after retirement",
+            allow_missing=False,
+            strict_directory_metadata=True,
+        )
+    journal = cleanup_journal_payload(target, reason=reason, entries=entries)
+    journal_content = canonical_json(journal)
+    validate_cleanup_journal(
+        target,
+        parse_json_object(journal_content, "cleanup pending journal"),
+        "cleanup pending journal",
+    )
+    try:
+        publish_regular_file_no_replace(
+            cleanup_pending_path(target),
+            journal_content,
+            "cleanup pending journal",
+        )
+    except BaseException:
+        if path_present(cleanup_pending_path(target)):
+            recover_cleanup_pending_publication_alias(target)
+            loaded = load_cleanup_pending(target, read_only=False)
+            if loaded == journal:
+                return True
+        recover_cleanup_intents(target)
+        raise
+    intent_path.unlink()
+    sync_directory(parent, "cleanup parent")
+    loaded = load_cleanup_pending(target, read_only=False)
+    if loaded != journal:
+        fail("cleanup pending journal failed final validation")
+    return True
+
+
 def software_presence(target: Path) -> dict[str, Any]:
     replace_paths_present = [
         str(relative) for relative in SOFTWARE_REPLACE_PATHS if path_present(target / relative)
@@ -2201,6 +3566,7 @@ def software_status(target: Path, *, recover_protected: bool = True) -> dict[str
             "installed": False,
             "current": False,
             "target": str(target),
+            "cleanup_pending": False,
             "version": None,
             "executable": None,
             "software_state": "absent",
@@ -2217,6 +3583,7 @@ def software_status(target: Path, *, recover_protected: bool = True) -> dict[str
     if not is_owner_private_directory(info):
         fail("target must be owned by the current user with mode 0700")
     canonical_target = target.resolve()
+    cleanup = cleanup_pending_metadata(canonical_target)
     executable = cline_executable(canonical_target)
     manifest = software_manifest_path(canonical_target)
     presence = software_presence(canonical_target)
@@ -2226,6 +3593,7 @@ def software_status(target: Path, *, recover_protected: bool = True) -> dict[str
             "installed": False,
             "current": False,
             "target": str(canonical_target),
+            **cleanup,
             "version": None,
             "executable": str(executable),
             **presence,
@@ -2240,6 +3608,7 @@ def software_status(target: Path, *, recover_protected: bool = True) -> dict[str
             "installed": True,
             "current": False,
             "target": str(canonical_target),
+            **cleanup,
             "version": None,
             "executable": str(executable),
             **presence,
@@ -2260,6 +3629,7 @@ def software_status(target: Path, *, recover_protected: bool = True) -> dict[str
         "installed": True,
         "current": current,
         "target": str(canonical_target),
+        **cleanup,
         "version": info.get("version"),
         "executable": str(executable),
         "package": info.get("package"),
@@ -2512,21 +3882,21 @@ def restore_software_paths(
             continue
 
 
-def replace_software_state(target: Path, live_stage: Path, hold_parent: Path) -> None:
+def replace_software_state(target: Path, live_stage: Path, hold_parent: Path) -> bool:
+    del hold_parent
     for relative in SOFTWARE_REPLACE_PATHS:
         source = live_stage / relative
         if not source.exists() and not source.is_symlink():
             fail(f"staged software path {relative} is missing")
         validate_replace_destination(target, relative)
-    hold = hold_parent / "rollback"
-    if hold.exists() or hold.is_symlink():
-        cleanup_path(hold)
-    hold.mkdir(mode=OWNER_DIRECTORY_MODE)
+    hold = target / MANAGER_CONTROL_RELATIVE / "software-transactions" / f"txn-{os.getpid()}-{time.time_ns()}"
+    hold.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True)
     preexisting_parent_paths = {
         relative for relative in SOFTWARE_PARENT_PATHS if path_present(target / relative)
     }
     moved_old: list[Path] = []
     installed_new: list[Path] = []
+    cleanup_pending = False
     try:
         for relative in SOFTWARE_REPLACE_PATHS:
             destination = target / relative
@@ -2540,6 +3910,19 @@ def replace_software_state(target: Path, live_stage: Path, hold_parent: Path) ->
         status = software_status(target)
         if not status["installed"] or not status["current"]:
             fail("installed Cline CLI did not validate as the tested version")
+        cleanup_created = publish_cleanup_pending_for_paths(
+            target,
+            [hold],
+            reason="software-replacement",
+        )
+        if cleanup_created:
+            try:
+                drain_cleanup_pending(target)
+            except Exception:
+                cleanup_pending = True
+        else:
+            with contextlib.suppress(OSError):
+                cleanup_path(hold)
     except BaseException:
         moved_old = [
             relative
@@ -2554,9 +3937,17 @@ def replace_software_state(target: Path, live_stage: Path, hold_parent: Path) ->
             installed_new=installed_new,
             preexisting_parent_paths=preexisting_parent_paths,
         )
+        with contextlib.suppress(OSError):
+            cleanup_path(hold)
+        for directory in (
+            target / MANAGER_CONTROL_RELATIVE / "software-transactions",
+            target / MANAGER_CONTROL_RELATIVE,
+        ):
+            with contextlib.suppress(OSError):
+                if path_present(directory) and directory.is_dir() and not directory.is_symlink():
+                    directory.rmdir()
         raise
-    finally:
-        shutil.rmtree(hold, ignore_errors=True)
+    return cleanup_pending
 
 
 def parse_node_major(version_output: str) -> int:
@@ -2634,43 +4025,66 @@ def write_stage_manifest(live_stage: Path) -> None:
 
 def install_or_update_cli(target: Path, *, operation: str) -> dict[str, Any]:
     require_supported_runtime_platform()
-    with bootstrap_lifecycle_lock(target) as locked_target:
-        if operation == "update-cli":
-            try:
-                info = locked_target.lstat()
-            except FileNotFoundError:
-                fail("Cline CLI is not installed; use install-cli")
-            if stat.S_ISLNK(info.st_mode):
-                fail("target must not be a symlink")
-            if not stat.S_ISDIR(info.st_mode):
-                fail("target must be a directory")
-            if not is_owner_private_directory(info):
-                fail("target must be owned by the current user with mode 0700")
-            canonical_target = locked_target
-        else:
-            canonical_target = ensure_target_directory(locked_target)
-            if canonical_target != locked_target:
-                fail_concurrent("target canonical path changed during lifecycle lock acquisition")
-        with target_lock(canonical_target):
-            result = install_or_update_cli_locked(canonical_target, operation=operation)
+    with coordinated_target(target, mutation=True, create_target_anchor=True) as locked_target:
+        created_target = False
+        parent_snapshot: dict[str, Any] | None = None
+        canonical_target = locked_target
+        try:
+            if operation == "update-cli":
+                try:
+                    info = locked_target.lstat()
+                except FileNotFoundError:
+                    fail("Cline CLI is not installed; use install-cli")
+                if stat.S_ISLNK(info.st_mode):
+                    fail("target must not be a symlink")
+                if not stat.S_ISDIR(info.st_mode):
+                    fail("target must be a directory")
+                if not is_owner_private_directory(info):
+                    fail("target must be owned by the current user with mode 0700")
+            else:
+                created_target = not path_present(locked_target)
+                parent_snapshot = directory_metadata(locked_target.parent) if created_target else None
+                canonical_target = ensure_target_directory(locked_target)
+                if canonical_target != locked_target:
+                    fail_concurrent("target canonical path changed during lifecycle lock acquisition")
+            cleanup_drained = drain_or_recover_cleanup_before_mutation(canonical_target)
+            status = software_status(canonical_target)
+            if status["installed"] and status["current"]:
+                return {
+                    "ok": True,
+                    "operation": operation,
+                    "target": str(canonical_target),
+                    "version": TESTED_CLI_VERSION,
+                    "package": NPM_PACKAGE,
+                    "package_manager": "npm",
+                    "install_method": "npm-ci-lockfile",
+                    "executable": str(cline_executable(canonical_target)),
+                    "changed": False,
+                    "cleanup_drained": cleanup_drained,
+                    "cleanup_pending": False,
+                }
+            with target_lock(canonical_target):
+                result = install_or_update_cli_locked(
+                    canonical_target,
+                    operation=operation,
+                    status=status,
+                    cleanup_drained=cleanup_drained,
+                )
+        except BaseException:
+            if created_target:
+                remove_created_target_tree(canonical_target, parent_snapshot)
+            raise
     return result
 
 
-def install_or_update_cli_locked(target: Path, *, operation: str) -> dict[str, Any]:
+def install_or_update_cli_locked(
+    target: Path,
+    *,
+    operation: str,
+    status: dict[str, Any],
+    cleanup_drained: bool,
+) -> dict[str, Any]:
     canonical_target = target
-    status = software_status(canonical_target)
-    if status["installed"] and status["current"]:
-        return {
-            "ok": True,
-            "operation": operation,
-            "target": str(canonical_target),
-            "version": TESTED_CLI_VERSION,
-            "package": NPM_PACKAGE,
-            "package_manager": "npm",
-            "install_method": "npm-ci-lockfile",
-            "executable": str(cline_executable(canonical_target)),
-            "changed": False,
-        }
     if operation == "install-cli":
         if status.get("partial"):
             fail(
@@ -2701,7 +4115,7 @@ def install_or_update_cli_locked(target: Path, *, operation: str) -> dict[str, A
         node = run_npm_install(staging, live_stage)
         chmod_private_tree(live_stage)
         write_stage_manifest(live_stage)
-        replace_software_state(canonical_target, live_stage, staging)
+        cleanup_pending = replace_software_state(canonical_target, live_stage, staging)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return {
@@ -2715,6 +4129,8 @@ def install_or_update_cli_locked(target: Path, *, operation: str) -> dict[str, A
         "node": node,
         "executable": str(cline_executable(canonical_target)),
         "changed": True,
+        "cleanup_drained": cleanup_drained,
+        "cleanup_pending": cleanup_pending,
     }
 
 
@@ -2788,6 +4204,8 @@ def launch_cline(target: Path, args: list[str]) -> int:
         state = inspect_target(canonical_target)
         if state["state"] != "managed":
             fail("target is not managed by nddev-cline-app")
+        if state.get("cleanup_pending"):
+            fail("target cleanup is pending; run a mutating command before launch")
         if state.get("needs_update"):
             fail("target setup was written by a prior build; run install or switch before launch")
         profile_id = state["profile_id"]

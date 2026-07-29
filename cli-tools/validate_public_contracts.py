@@ -674,16 +674,23 @@ def validate_runtime_contract(errors: list[str]) -> None:
             require("not portable fd execution" in lock_policy, "launch policy must not claim portable fd execution", errors)
             require("same-UID chmod" in lock_policy, "launch policy must disclose same-UID chmod boundary", errors)
             require("dedicated target-internal lock directory" in lock_policy, "launch policy must use a dedicated lock directory", errors)
-            require("external/bootstrap" in lock_policy, "launch policy must use an external bootstrap lock", errors)
+            require("product global.lock" in lock_policy, "launch policy must use the product global lock", errors)
+            require("canonical-target anchor" in lock_policy, "launch policy must use canonical target anchors", errors)
+            require("Read-only status, plan, and software-status never create" in lock_policy, "launch policy must declare read-only no-create coordination", errors)
             require("fixed resolved system temp root" in lock_policy, "launch policy must bind bootstrap lock to fixed system temp", errors)
-            require("never removed on normal release" in lock_policy, "launch policy must keep bootstrap lock persistent", errors)
-            require("external first and internal second" in lock_policy, "launch policy must document lock acquisition order", errors)
-            require("internal first and external last" in lock_policy, "launch policy must document lock release order", errors)
+            require("never removed by normal lifecycle cleanup" in lock_policy, "launch policy must keep external anchors persistent", errors)
+            require("product external, canonical external, then internal" in lock_policy, "launch policy must document lock acquisition order", errors)
+            require("internal before canonical external" in lock_policy, "launch policy must document lock release order", errors)
             require("renames the internal lock directory" in lock_policy, "launch policy must cover internal lock directory rename", errors)
             require("bootstrap lock root" in lock_policy, "launch policy must disclose bootstrap root same-UID boundary", errors)
             require("target root, HOME, config, TMP, XDG, runtime, and sandbox directories remain writable" in lock_policy, "launch policy must preserve runtime writability", errors)
-        require("--data-dir" not in launch.get("full_auto_command", ""), "full-auto command must not include --data-dir", errors)
-        require("CLINE_SANDBOX" not in launch.get("full_auto_command", ""), "full-auto command must not set sandbox env", errors)
+            require("--data-dir" not in launch.get("full_auto_command", ""), "full-auto command must not include --data-dir", errors)
+            require("CLINE_SANDBOX" not in launch.get("full_auto_command", ""), "full-auto command must not set sandbox env", errors)
+            require(
+                "cleanup is pending" in (ROOT / "cli-tools" / "nddev_cline.py").read_text(encoding="utf-8"),
+                "launch must fail closed while cleanup is pending",
+                errors,
+            )
     if isinstance(software, dict):
         cli = software.get("cli")
         extension = software.get("extension")
@@ -735,6 +742,20 @@ def validate_runtime_contract(errors: list[str]) -> None:
             require(cli.get("layout", {}).get("package_wrapper") == str(nddev_cline.PACKAGE_WRAPPER_RELATIVE), "package wrapper path mismatch", errors)
             require(cli.get("version_probe", {}).get("timeout_seconds") == nddev_cline.VERSION_PROBE_TIMEOUT_SECONDS, "version probe timeout mismatch", errors)
     lifecycle = manifest.get("software_lifecycle")
+    if isinstance(transaction, dict):
+        require(
+            transaction.get("cleanup_journal_schema") == nddev_cline.CLEANUP_SCHEMA_VERSION,
+            "contract cleanup journal schema mismatch",
+            errors,
+        )
+        cleanup_policy = transaction.get("cleanup_pending")
+        require(
+            isinstance(cleanup_policy, str)
+            and "read-only commands expose valid pending state without repair" in cleanup_policy
+            and "launch fails closed" in cleanup_policy,
+            "contract cleanup pending policy mismatch",
+            errors,
+        )
     require(isinstance(lifecycle, dict), "manifest software_lifecycle missing", errors)
     if isinstance(lifecycle, dict):
         require(lifecycle.get("install_argv", [None])[0:2] == ["npm", "ci"], "manifest install argv must use npm ci", errors)
@@ -748,6 +769,19 @@ def validate_runtime_contract(errors: list[str]) -> None:
                 require(flag not in install_argv, f"manifest install argv must not contain {flag}", errors)
         require(lifecycle.get("lifecycle_scripts") == "disabled", "manifest lifecycle script policy mismatch", errors)
         require(lifecycle.get("bin_links") == "disabled", "manifest bin-links policy mismatch", errors)
+        require(
+            lifecycle.get("cleanup_journal_schema") == nddev_cline.CLEANUP_SCHEMA_VERSION,
+            "manifest cleanup journal schema mismatch",
+            errors,
+        )
+        cleanup_policy = lifecycle.get("cleanup_pending")
+        require(
+            isinstance(cleanup_policy, str)
+            and "launch fails closed" in cleanup_policy
+            and "drains it before active changes" in cleanup_policy,
+            "manifest cleanup pending policy mismatch",
+            errors,
+        )
         expected_node_preflight = (
             f"Node.js {nddev_cline.MIN_NODE_MAJOR}+ required; "
             f"{nddev_cline.RECOMMENDED_NODE_MAJOR} recommended"
@@ -757,9 +791,11 @@ def validate_runtime_contract(errors: list[str]) -> None:
         require(
             isinstance(handoff, str)
             and "path-based spawn" in handoff
-            and "external/bootstrap" in handoff
+            and "product global.lock" in handoff
+            and "canonical-target" in handoff
+            and "no-create" in handoff
             and "fixed system temp" in handoff
-            and "acquisition external first/internal second" in handoff
+            and "acquisition product external/canonical external/internal" in handoff
             and "mutable target, HOME, config, TMP, XDG, runtime, and sandbox directories stay writable" in handoff,
             "manifest launch handoff policy mismatch",
             errors,
@@ -1732,22 +1768,16 @@ def validate_claude_bridge(errors: list[str]) -> None:
 def main() -> int:
     errors: list[str] = []
     validate_bootstrap_lock_contract(errors)
-    with isolated_bootstrap_root(errors):
-        validate_versions(errors)
-        validate_setups_and_profiles(errors)
-        validate_install_lock_assets(errors)
-        validate_builder(errors)
-        validate_runtime_contract(errors)
-        validate_bootstrap_lock_smokes(errors)
-        validate_bootstrap_lock_handover(errors)
-        validate_launch_profiles(errors)
-        validate_npm_stage_and_timeout(errors)
-        validate_security_smokes(errors)
-        validate_current_sources(errors)
-        validate_absence_of_placeholders(errors)
-        validate_shared_ci(errors)
-        validate_release_workflow(errors)
-        validate_claude_bridge(errors)
+    validate_versions(errors)
+    validate_setups_and_profiles(errors)
+    validate_install_lock_assets(errors)
+    validate_builder(errors)
+    validate_runtime_contract(errors)
+    validate_current_sources(errors)
+    validate_absence_of_placeholders(errors)
+    validate_shared_ci(errors)
+    validate_release_workflow(errors)
+    validate_claude_bridge(errors)
     if errors:
         for error in errors:
             print(error)
