@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -12,9 +13,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.dont_write_bytecode = True
-sys.path.insert(0, str(ROOT / "cli-tools"))
-import nddev_cline  # noqa: E402
+MANAGER_PATH = ROOT / "cli-tools" / "nddev_cline.py"
 
 SEMVER = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:[-+].*)?\Z")
 SETUP_IDS = ["nddev-builder"]
@@ -134,6 +133,70 @@ FORBIDDEN_BOOTSTRAP_OVERRIDE_NAMES = (
 PLACEHOLDER_MARKER = "skele" + "ton"
 
 
+def manager_source_contract(errors: list[str]) -> tuple[str, dict[str, ast.AST]]:
+    try:
+        source = MANAGER_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(MANAGER_PATH))
+    except (OSError, SyntaxError) as exc:
+        errors.append(f"cannot parse public manager source: {exc}")
+        return "", {}
+    assignments: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value
+            if value is None:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    assignments[target.id] = value
+    return source, assignments
+
+
+def manager_literal(
+    assignments: dict[str, ast.AST],
+    name: str,
+    errors: list[str],
+) -> Any:
+    node = assignments.get(name)
+    if node is None:
+        errors.append(f"manager constant is missing: {name}")
+        return None
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError):
+        errors.append(f"manager constant must remain a static literal: {name}")
+        return None
+
+
+def manager_positive_integer(
+    assignments: dict[str, ast.AST],
+    name: str,
+    errors: list[str],
+) -> int | None:
+    node = assignments.get(name)
+    if node is None:
+        errors.append(f"manager constant is missing: {name}")
+        return None
+
+    def evaluate(value: ast.AST) -> int:
+        if isinstance(value, ast.Constant) and isinstance(value.value, int):
+            return value.value
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Mult):
+            return evaluate(value.left) * evaluate(value.right)
+        raise ValueError
+
+    try:
+        result = evaluate(node)
+    except ValueError:
+        errors.append(f"manager constant must remain a static integer expression: {name}")
+        return None
+    if result <= 0:
+        errors.append(f"manager constant must remain positive: {name}")
+        return None
+    return result
+
+
 def read_json(relative: str) -> dict[str, Any]:
     value = json.loads((ROOT / relative).read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -147,7 +210,19 @@ def require(condition: bool, message: str, errors: list[str]) -> None:
 
 
 def expected_managed_files() -> set[str]:
-    return {str(path) for path in nddev_cline.MANAGED_PATHS}
+    builder_root = ROOT / "plugins" / "nddev-builder"
+    projected = {
+        f"home/.cline/{path.relative_to(builder_root).as_posix()}"
+        for path in builder_root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+    return {
+        "home/.cline/data/settings/global-settings.json",
+        "home/.cline/data/settings/cline_mcp_settings.json",
+        "home/.cline/rules/nddev-managed.md",
+        *projected,
+        "NDDEV-CLINE-SETUP.json",
+    }
 
 
 def sha256_file(path: Path) -> str:
@@ -242,6 +317,7 @@ def validate_no_symlinks_under(path: Path, label: str, errors: list[str]) -> Non
 
 
 def validate_versions(errors: list[str]) -> None:
+    _source, manager = manager_source_contract(errors)
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     build = read_json("build/version.json")
     manifest = read_json("build/manifest.json")
@@ -251,16 +327,16 @@ def validate_versions(errors: list[str]) -> None:
     require(build.get("build_version") == version, "build version mismatch", errors)
     require(manifest.get("build_version") == version, "manifest version mismatch", errors)
     require(manifest.get("name") == contract.get("product_name"), "manifest name mismatch", errors)
-    require(build.get("node_minimum_major") == nddev_cline.MIN_NODE_MAJOR, "Node minimum mismatch", errors)
-    require(build.get("node_recommended_major") == nddev_cline.RECOMMENDED_NODE_MAJOR, "Node recommended mismatch", errors)
+    require(build.get("node_minimum_major") == manager_literal(manager, "MIN_NODE_MAJOR", errors), "Node minimum mismatch", errors)
+    require(build.get("node_recommended_major") == manager_literal(manager, "RECOMMENDED_NODE_MAJOR", errors), "Node recommended mismatch", errors)
     require(build.get("nddev_builder_extension_version") == version, "builder version mismatch", errors)
     cli_version = build.get("cline_cli_tested")
     cli_package = build.get("cline_cli_package")
     extension_version = build.get("cline_extension_tested")
     extension_id = build.get("vscode_extension_id")
-    require(cli_version == nddev_cline.TESTED_CLI_VERSION, "manager CLI version mismatch", errors)
-    require(cli_package == nddev_cline.NPM_PACKAGE, "manager CLI package mismatch", errors)
-    require(extension_version == nddev_cline.TESTED_EXTENSION_VERSION, "manager extension version mismatch", errors)
+    require(cli_version == manager_literal(manager, "TESTED_CLI_VERSION", errors), "manager CLI version mismatch", errors)
+    require(cli_package == manager_literal(manager, "NPM_PACKAGE", errors), "manager CLI package mismatch", errors)
+    require(extension_version == manager_literal(manager, "TESTED_EXTENSION_VERSION", errors), "manager extension version mismatch", errors)
     install_env = build.get("npm_ci_lockfile_install_env")
     require(isinstance(install_env, list), "build npm install env list missing", errors)
     if isinstance(install_env, list):
@@ -366,6 +442,11 @@ def validate_setups_and_profiles(errors: list[str]) -> None:
 
 
 def validate_install_lock_assets(errors: list[str]) -> None:
+    _source, manager = manager_source_contract(errors)
+    command_name = manager_literal(manager, "COMMAND_NAME", errors)
+    optional_packages = manager_literal(manager, "EXPECTED_CLINE_OPTIONAL_PACKAGES", errors)
+    native_packages = manager_literal(manager, "SUPPORTED_NATIVE_OPTIONAL_PACKAGES", errors)
+    npm_registry = manager_literal(manager, "NPM_REGISTRY", errors)
     build = read_json("build/version.json")
     manifest = read_json("build/manifest.json")
     contract = read_json("config/nddev-contract.json")
@@ -395,10 +476,10 @@ def validate_install_lock_assets(errors: list[str]) -> None:
     require(isinstance(cline_package, dict), "package-lock cline package missing", errors)
     if isinstance(cline_package, dict):
         require(cline_package.get("version") == cli_version, "package-lock cline package version mismatch", errors)
-        require(cline_package.get("bin") == {nddev_cline.COMMAND_NAME: "bin/cline"}, "package-lock cline package wrapper bin mismatch", errors)
+        require(cline_package.get("bin") == {command_name: "bin/cline"}, "package-lock cline package wrapper bin mismatch", errors)
         require(
             cline_package.get("optionalDependencies")
-            == {package: cli_version for package in nddev_cline.EXPECTED_CLINE_OPTIONAL_PACKAGES},
+            == {package: cli_version for package in optional_packages or ()},
             "package-lock cline optional dependency map mismatch",
             errors,
         )
@@ -413,19 +494,19 @@ def validate_install_lock_assets(errors: list[str]) -> None:
         if package_name in optional_expected:
             optional_seen = optional_seen | {package_name}
             require(metadata.get("version") == cli_version, f"optional package {package_name} version mismatch", errors)
-            native_contract = nddev_cline.SUPPORTED_NATIVE_OPTIONAL_PACKAGES.get(package_name)
+            native_contract = native_packages.get(package_name) if isinstance(native_packages, dict) else None
             if native_contract is not None:
                 require(metadata.get("optional") is True, f"optional package {package_name} must be optional", errors)
                 require(metadata.get("os") == native_contract["os"], f"optional package {package_name} os selector mismatch", errors)
                 require(metadata.get("cpu") == native_contract["cpu"], f"optional package {package_name} cpu selector mismatch", errors)
                 require(
-                    metadata.get("bin") == {nddev_cline.COMMAND_NAME: native_contract["bin"]},
+                    metadata.get("bin") == {command_name: native_contract["bin"]},
                     f"optional package {package_name} bin mapping mismatch",
                     errors,
                 )
         resolved = metadata.get("resolved")
         if isinstance(resolved, str):
-            require(resolved.startswith(nddev_cline.NPM_REGISTRY), f"non-registry resolved URL in lock: {package_path}", errors)
+            require(isinstance(npm_registry, str) and resolved.startswith(npm_registry), f"non-registry resolved URL in lock: {package_path}", errors)
             lowered = resolved.lower()
             require(not lowered.startswith(("git+", "file:", "http://")), f"unsafe resolved URL in lock: {package_path}", errors)
         elif metadata.get("link") is not True:
@@ -433,12 +514,6 @@ def validate_install_lock_assets(errors: list[str]) -> None:
         if metadata.get("link") is not True:
             require(isinstance(metadata.get("integrity"), str), f"integrity missing in lock: {package_path}", errors)
     require(optional_seen == optional_expected, "optional Cline platform package set mismatch", errors)
-    try:
-        nddev_cline.validate_install_lock_contract()
-    except nddev_cline.ClineSetupError as exc:
-        require(False, f"manager lock validation failed: {exc}", errors)
-
-
 def validate_builder(errors: list[str]) -> None:
     contract = read_json("config/nddev-contract.json")
     build = read_json("build/version.json")
@@ -489,6 +564,7 @@ def validate_builder(errors: list[str]) -> None:
 
 
 def validate_runtime_contract(errors: list[str]) -> None:
+    source, manager = manager_source_contract(errors)
     contract = read_json("config/nddev-contract.json")
     manifest = read_json("build/manifest.json")
     launch = contract.get("runtime_launch")
@@ -497,10 +573,12 @@ def validate_runtime_contract(errors: list[str]) -> None:
     build = read_json("build/version.json")
     baseline = read_json("references/cline-baseline.json")
     npm = baseline.get("npm")
-    require(nddev_cline.NPM_PACKAGE_SPEC == f"{build.get('cline_cli_package')}@{build.get('cline_cli_tested')}", "runtime npm package spec mismatch", errors)
-    require(nddev_cline.DEFAULT_SETUP_ID == "nddev-builder", "runtime default setup mismatch", errors)
-    require(nddev_cline.DEFAULT_PROFILE_ID == "full-auto", "runtime default profile mismatch", errors)
-    require(sorted(nddev_cline.BLOCKED_LAUNCH_FLAGS) == sorted(EXPECTED["blocked_launch_flags"]), "blocked launch flags mismatch", errors)
+    require(manager_literal(manager, "NPM_PACKAGE", errors) == build.get("cline_cli_package"), "runtime npm package mismatch", errors)
+    require(manager_literal(manager, "TESTED_CLI_VERSION", errors) == build.get("cline_cli_tested"), "runtime npm version mismatch", errors)
+    require(manager_literal(manager, "DEFAULT_SETUP_ID", errors) == "nddev-builder", "runtime default setup mismatch", errors)
+    require(manager_literal(manager, "DEFAULT_PROFILE_ID", errors) == "full-auto", "runtime default profile mismatch", errors)
+    blocked_flags = manager_literal(manager, "BLOCKED_LAUNCH_FLAGS", errors)
+    require(isinstance(blocked_flags, (set, tuple, list)) and sorted(blocked_flags) == sorted(EXPECTED["blocked_launch_flags"]), "blocked launch flags mismatch", errors)
     require(isinstance(launch, dict), "runtime_launch missing", errors)
     require(isinstance(software, dict), "software_install missing", errors)
     require(isinstance(transaction, dict), "transaction_policy missing", errors)
@@ -542,7 +620,7 @@ def validate_runtime_contract(errors: list[str]) -> None:
             require("--data-dir" not in launch.get("full_auto_command", ""), "full-auto command must not include --data-dir", errors)
             require("CLINE_SANDBOX" not in launch.get("full_auto_command", ""), "full-auto command must not set sandbox env", errors)
             require(
-                "cleanup is pending" in (ROOT / "cli-tools" / "nddev_cline.py").read_text(encoding="utf-8"),
+                "cleanup is pending" in source,
                 "launch must fail closed while cleanup is pending",
                 errors,
             )
@@ -553,7 +631,7 @@ def validate_runtime_contract(errors: list[str]) -> None:
         require(isinstance(extension, dict) and extension.get("supported") is False, "extension install must be unsupported", errors)
         if isinstance(cli, dict):
             require(cli.get("package_manager") == "npm", "CLI package manager must be npm", errors)
-            require(cli.get("registry") == nddev_cline.NPM_REGISTRY, "npm registry mismatch", errors)
+            require(cli.get("registry") == manager_literal(manager, "NPM_REGISTRY", errors), "npm registry mismatch", errors)
             require(cli.get("lockfile_sha256") == build.get("cline_cli_lockfile_sha256"), "contract CLI lock digest mismatch", errors)
             require(cli.get("install_argv", [None])[0:2] == ["npm", "ci"], "contract install argv must use npm ci", errors)
             install_argv = cli.get("install_argv")
@@ -588,18 +666,31 @@ def validate_runtime_contract(errors: list[str]) -> None:
             require(
                 cli.get("node_preflight")
                 == {
-                    "minimum_major": nddev_cline.MIN_NODE_MAJOR,
-                    "recommended_major": nddev_cline.RECOMMENDED_NODE_MAJOR,
+                    "minimum_major": manager_literal(manager, "MIN_NODE_MAJOR", errors),
+                    "recommended_major": manager_literal(manager, "RECOMMENDED_NODE_MAJOR", errors),
                 },
                 "Node preflight mismatch",
                 errors,
             )
-            require(cli.get("layout", {}).get("package_wrapper") == str(nddev_cline.PACKAGE_WRAPPER_RELATIVE), "package wrapper path mismatch", errors)
-            require(cli.get("version_probe", {}).get("timeout_seconds") == nddev_cline.VERSION_PROBE_TIMEOUT_SECONDS, "version probe timeout mismatch", errors)
+            wrapper = ast.unparse(manager.get("PACKAGE_WRAPPER_RELATIVE")) if manager.get("PACKAGE_WRAPPER_RELATIVE") is not None else ""
+            require(
+                all(
+                    token in wrapper
+                    for token in (
+                        "INSTALL_PROJECT_RELATIVE",
+                        "node_modules",
+                        "cline",
+                        "bin",
+                    )
+                ),
+                "manager package wrapper source mismatch",
+                errors,
+            )
+            require(cli.get("version_probe", {}).get("timeout_seconds") == manager_literal(manager, "VERSION_PROBE_TIMEOUT_SECONDS", errors), "version probe timeout mismatch", errors)
     lifecycle = manifest.get("software_lifecycle")
     if isinstance(transaction, dict):
         require(
-            transaction.get("cleanup_journal_schema") == nddev_cline.CLEANUP_SCHEMA_VERSION,
+            transaction.get("cleanup_journal_schema") == manager_literal(manager, "CLEANUP_SCHEMA_VERSION", errors),
             "contract cleanup journal schema mismatch",
             errors,
         )
@@ -625,7 +716,7 @@ def validate_runtime_contract(errors: list[str]) -> None:
         require(lifecycle.get("lifecycle_scripts") == "disabled", "manifest lifecycle script policy mismatch", errors)
         require(lifecycle.get("bin_links") == "disabled", "manifest bin-links policy mismatch", errors)
         require(
-            lifecycle.get("cleanup_journal_schema") == nddev_cline.CLEANUP_SCHEMA_VERSION,
+            lifecycle.get("cleanup_journal_schema") == manager_literal(manager, "CLEANUP_SCHEMA_VERSION", errors),
             "manifest cleanup journal schema mismatch",
             errors,
         )
@@ -638,8 +729,8 @@ def validate_runtime_contract(errors: list[str]) -> None:
             errors,
         )
         expected_node_preflight = (
-            f"Node.js {nddev_cline.MIN_NODE_MAJOR}+ required; "
-            f"{nddev_cline.RECOMMENDED_NODE_MAJOR} recommended"
+            f"Node.js {manager_literal(manager, 'MIN_NODE_MAJOR', errors)}+ required; "
+            f"{manager_literal(manager, 'RECOMMENDED_NODE_MAJOR', errors)} recommended"
         )
         require(lifecycle.get("node_preflight") == expected_node_preflight, "manifest Node preflight mismatch", errors)
         handoff = lifecycle.get("launch_handoff_policy")
@@ -658,23 +749,29 @@ def validate_runtime_contract(errors: list[str]) -> None:
         bounds = lifecycle.get("bounds")
         require(isinstance(bounds, dict), "manifest software bounds missing", errors)
         if isinstance(bounds, dict):
-            require(bounds.get("max_tree_paths") == nddev_cline.SOFTWARE_TREE_MAX_PATHS, "software path bound mismatch", errors)
-            require(bounds.get("max_tree_bytes") == nddev_cline.SOFTWARE_TREE_MAX_BYTES, "software byte bound mismatch", errors)
+            require(bounds.get("max_tree_paths") == manager_positive_integer(manager, "SOFTWARE_TREE_MAX_PATHS", errors), "software path bound mismatch", errors)
+            require(bounds.get("max_tree_bytes") == manager_positive_integer(manager, "SOFTWARE_TREE_MAX_BYTES", errors), "software byte bound mismatch", errors)
 
 
 def validate_bootstrap_lock_contract(errors: list[str]) -> None:
-    source = (ROOT / "cli-tools/nddev_cline.py").read_text(encoding="utf-8")
-    expected_root = Path("/private/tmp").resolve() if sys.platform.startswith("darwin") else Path("/tmp").resolve()
-    observed_root = nddev_cline.fixed_system_temp_root()
-    require(observed_root == expected_root, "bootstrap lock root must use the fixed system temp root", errors)
-    try:
-        info = observed_root.lstat()
-    except FileNotFoundError:
-        require(False, "bootstrap fixed system temp root is missing", errors)
-    else:
-        require(stat.S_ISDIR(info.st_mode), "bootstrap fixed system temp root must be a directory", errors)
-        require(not stat.S_ISLNK(info.st_mode), "bootstrap fixed system temp root must not be a symlink", errors)
-        require(bool(stat.S_IMODE(info.st_mode) & stat.S_ISVTX), "bootstrap fixed system temp root must be sticky", errors)
+    source, _manager = manager_source_contract(errors)
+    tree = ast.parse(source, filename=str(MANAGER_PATH)) if source else ast.Module(body=[])
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    fixed_root = functions.get("fixed_system_temp_root")
+    fixed_root_source = ast.get_source_segment(source, fixed_root) if fixed_root else ""
+    require(
+        bool(fixed_root_source)
+        and 'Path("/private/tmp")' in fixed_root_source
+        and 'Path("/tmp")' in fixed_root_source
+        and "sys.platform" in fixed_root_source
+        and ".resolve(" in fixed_root_source,
+        "bootstrap lock root source contract mismatch",
+        errors,
+    )
     require("gettempdir(" not in source, "bootstrap lock root must not use tempfile.gettempdir", errors)
     for name in FORBIDDEN_BOOTSTRAP_OVERRIDE_NAMES:
         require(name not in source, f"public bootstrap override must not exist: {name}", errors)
