@@ -29,10 +29,10 @@
   "runtime_compatibility": {
     "baseline_ref": "references/cline-baseline.json",
     "version_ref": "build/version.json",
-    "cli_tested_version": "3.0.46",
+    "cli_tested_version": "3.0.47",
     "cli_package": "cline",
     "cli_command": "cline",
-    "extension_tested_version": "4.0.11",
+    "extension_tested_version": "4.0.12",
     "vscode_extension_id": "saoudrizwan.claude-dev",
     "supported_platforms": ["macos-arm64", "macos-x64", "ubuntu-glibc-arm64", "ubuntu-glibc-x64"],
     "unsupported_platforms": ["windows"],
@@ -46,7 +46,6 @@
       "https://raw.githubusercontent.com/cline/cline/main/apps/cli/README.md",
       "https://raw.githubusercontent.com/cline/cline/main/sdk/packages/shared/src/storage/paths.ts",
       "https://raw.githubusercontent.com/cline/cline/main/apps/cli/src/commands/config.ts",
-      "https://github.com/cline/cline/releases/tag/v4.0.11",
       "https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev"
     ]
   },
@@ -159,10 +158,10 @@
   "software_install": {
     "cli": {
       "supported": true,
-      "tested_version": "3.0.46",
+      "tested_version": "3.0.47",
       "source": "official npm package cline installed by npm ci from the committed public package-lock",
       "package": "cline",
-      "package_spec": "cline@3.0.46",
+      "package_spec": "cline@3.0.47",
       "package_manager": "npm",
       "registry": "https://registry.npmjs.org/",
       "node_preflight": {
@@ -173,7 +172,7 @@
         "software/cline-cli/package.json",
         "software/cline-cli/package-lock.json"
       ],
-      "lockfile_sha256": "6edd73e2f6de4d8988431069696bf4318cd950ed3439b42b2baa4497b0874bdb",
+      "lockfile_sha256": "0fc2629ceabe085f38b08fc90609e2056beb5dea82adbf7a01b6e3d46251db73",
       "install_argv": [
         "npm",
         "ci",
@@ -191,7 +190,7 @@
         "--bin-links=false"
       ],
       "lockfile_preflight": {
-        "root_dependency": "cline@3.0.46",
+        "root_dependency": "cline@3.0.47",
         "registry_only_resolved_urls": true,
         "integrity_required_for_non_link_packages": true,
         "cline_package_wrapper_bin": "bin/cline",
@@ -208,10 +207,10 @@
       "bin_links": "disabled",
       "registry_metadata": {
         "package": "cline",
-        "version": "3.0.46",
-        "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.46.tgz",
-        "integrity": "sha512-U6uH3sLVvqx4fP65ejHkswhk3WvYOM2LCbQBX77Z7Tha4EX35vo2XZ51F6WnIiKlCAYZJ+YAEou2Yha/EAk+2A==",
-        "shasum": "5b731496d251f76448fe676edbf4fde415b58881"
+        "version": "3.0.47",
+        "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.47.tgz",
+        "integrity": "sha512-3+RfBKRFk1s89FxYZJpM9t1dGLrpz/9WlP/zO9QP2U36C2A5ZvW7wbNKe8eFgYn52ihvKnT7wIel8KQz2vSf8Q==",
+        "shasum": "e3c46aa1a6a8a0e52c2ab81b9d3b74f62b092f35"
       },
       "environment_policy": {
         "inheritance": "minimal-allowlist",
@@ -267,9 +266,9 @@
     },
     "extension": {
       "supported": false,
-      "tested_version": "4.0.11",
+      "tested_version": "4.0.12",
       "vscode_extension_id": "saoudrizwan.claude-dev",
-      "vsix_sha256": "a4641d8bc47f766300203cee0c4e1d84f690a88586b43e81ed015bba9af79a2d",
+      "vsix_sha256": "64b3a86af9f00ad48fd2d430e7d75707b1a8e05bfa5810c8792e23c6876347ce",
       "reason": "No live VS Code/Cline extension state is installed or launched by this manager."
     },
     "commands": {

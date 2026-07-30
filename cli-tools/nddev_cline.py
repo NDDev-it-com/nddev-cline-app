@@ -46,8 +46,8 @@ BASELINE_REF = ROOT / "references" / "cline-baseline.json"
 INSTALL_LOCK_ROOT = ROOT / "software" / "cline-cli"
 INSTALL_PACKAGE_JSON = INSTALL_LOCK_ROOT / "package.json"
 INSTALL_PACKAGE_LOCK = INSTALL_LOCK_ROOT / "package-lock.json"
-TESTED_CLI_VERSION = "3.0.46"
-TESTED_EXTENSION_VERSION = "4.0.11"
+TESTED_CLI_VERSION = "3.0.47"
+TESTED_EXTENSION_VERSION = "4.0.12"
 NPM_PACKAGE = "cline"
 NPM_PACKAGE_SPEC = f"{NPM_PACKAGE}@{TESTED_CLI_VERSION}"
 NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -82,7 +82,7 @@ SOFTWARE_TREE_MAX_BYTES = 512 * 1024 * 1024
 SOFTWARE_TREE_MAX_PATHS = 50000
 PROCESS_OUTPUT_MAX_BYTES = 64 * 1024
 PROCESS_TIMEOUT_SECONDS = 120
-# Fresh cline@3.0.46 macOS arm64 stages measured 15.214s at the slowest.
+# Fresh cline@3.0.47 macOS arm64 stages measured 15.214s at the slowest.
 # references/cline-baseline.json owns the calibration evidence and public bound.
 VERSION_PROBE_TIMEOUT_SECONDS = 60
 SETUP_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")

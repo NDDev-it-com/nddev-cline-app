@@ -5,7 +5,7 @@
   "cli": {
     "command": "cline",
     "package": "cline",
-    "version": "3.0.46",
+    "version": "3.0.47",
     "bin": {
       "cline": "bin/cline"
     },
@@ -24,20 +24,20 @@
   },
   "npm": {
     "package": "cline",
-    "version": "3.0.46",
-    "integrity": "sha512-U6uH3sLVvqx4fP65ejHkswhk3WvYOM2LCbQBX77Z7Tha4EX35vo2XZ51F6WnIiKlCAYZJ+YAEou2Yha/EAk+2A==",
-    "shasum": "5b731496d251f76448fe676edbf4fde415b58881",
-    "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.46.tgz",
+    "version": "3.0.47",
+    "integrity": "sha512-3+RfBKRFk1s89FxYZJpM9t1dGLrpz/9WlP/zO9QP2U36C2A5ZvW7wbNKe8eFgYn52ihvKnT7wIel8KQz2vSf8Q==",
+    "shasum": "e3c46aa1a6a8a0e52c2ab81b9d3b74f62b092f35",
+    "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.47.tgz",
     "scripts": {
       "postinstall": "node ./postinstall.mjs || true"
     },
     "optional_dependencies": {
-      "@cline/cli-darwin-arm64": "3.0.46",
-      "@cline/cli-darwin-x64": "3.0.46",
-      "@cline/cli-linux-arm64": "3.0.46",
-      "@cline/cli-linux-x64": "3.0.46",
-      "@cline/cli-windows-arm64": "3.0.46",
-      "@cline/cli-windows-x64": "3.0.46"
+      "@cline/cli-darwin-arm64": "3.0.47",
+      "@cline/cli-darwin-x64": "3.0.47",
+      "@cline/cli-linux-arm64": "3.0.47",
+      "@cline/cli-linux-x64": "3.0.47",
+      "@cline/cli-windows-arm64": "3.0.47",
+      "@cline/cli-windows-x64": "3.0.47"
     }
   },
   "package_manager": {
@@ -62,32 +62,17 @@
     "registry": "https://registry.npmjs.org/",
     "install_project_policy": "target-owned staged npm ci project only",
     "lockfile": "software/cline-cli/package-lock.json",
-    "lockfile_sha256": "6edd73e2f6de4d8988431069696bf4318cd950ed3439b42b2baa4497b0874bdb"
+    "lockfile_sha256": "0fc2629ceabe085f38b08fc90609e2056beb5dea82adbf7a01b6e3d46251db73"
   },
   "extension": {
     "publisher": "saoudrizwan",
     "name": "claude-dev",
     "display_name": "Cline",
     "id": "saoudrizwan.claude-dev",
-    "version": "4.0.11",
+    "version": "4.0.12",
     "marketplace_url": "https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev",
     "install_supported_by_manager": false,
     "launch_supported_by_manager": false
-  },
-  "release": {
-    "repository": "cline/cline",
-    "tag": "v4.0.11",
-    "version": "4.0.11",
-    "published_at": "2026-07-24T19:03:48Z",
-    "url": "https://github.com/cline/cline/releases/tag/v4.0.11",
-    "assets": {
-      "vscode-vsix": {
-        "name": "cline-4.0.11.vsix",
-        "size": 10428664,
-        "sha256": "a4641d8bc47f766300203cee0c4e1d84f690a88586b43e81ed015bba9af79a2d",
-        "url": "https://github.com/cline/cline/releases/download/v4.0.11/cline-4.0.11.vsix"
-      }
-    }
   },
   "native_surfaces": {
     "global_root": "~/.cline/",
@@ -121,7 +106,6 @@
     "https://raw.githubusercontent.com/cline/cline/main/sdk/packages/shared/src/storage/paths.ts",
     "https://raw.githubusercontent.com/cline/cline/main/sdk/packages/core/src/hooks/hook-file-config.ts",
     "https://raw.githubusercontent.com/cline/cline/main/sdk/packages/core/src/hooks/hook-file-hooks.ts",
-    "https://github.com/cline/cline/releases/tag/v4.0.11",
     "https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev",
     "https://docs.npmjs.com/cli/v11/commands/npm-ci/",
     "https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/",

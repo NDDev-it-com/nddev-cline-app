@@ -345,11 +345,9 @@ def validate_versions(errors: list[str]) -> None:
     npm = baseline.get("npm")
     package_manager = baseline.get("package_manager")
     extension = baseline.get("extension")
-    release = baseline.get("release")
     require(isinstance(npm, dict), "baseline npm missing", errors)
     require(isinstance(package_manager, dict), "baseline package_manager missing", errors)
     require(isinstance(extension, dict), "baseline extension missing", errors)
-    require(isinstance(release, dict), "baseline release missing", errors)
     if isinstance(npm, dict):
         require(npm.get("version") == cli_version, "baseline npm version mismatch", errors)
         require(npm.get("package") == cli_package, "baseline npm package mismatch", errors)
@@ -381,16 +379,12 @@ def validate_versions(errors: list[str]) -> None:
     if isinstance(extension, dict):
         require(extension.get("id") == extension_id, "baseline extension id mismatch", errors)
         require(extension.get("version") == extension_version, "baseline extension version mismatch", errors)
-    if isinstance(release, dict):
-        require(release.get("version") == extension_version, "baseline release version mismatch", errors)
-        require(release.get("tag") == build.get("cline_extension_release_tag"), "baseline release tag mismatch", errors)
-        require(release.get("published_at") == build.get("cline_extension_published_at"), "baseline release published_at mismatch", errors)
-        require(
-            release.get("assets", {}).get("vscode-vsix", {}).get("sha256")
-            == build.get("vscode_extension_vsix_sha256"),
-            "baseline VSIX digest mismatch",
-            errors,
-        )
+    require(
+        contract.get("software_install", {}).get("extension", {}).get("vsix_sha256")
+        == build.get("vscode_extension_vsix_sha256"),
+        "extension VSIX digest mismatch",
+        errors,
+    )
     runtime = contract.get("runtime_compatibility")
     require(isinstance(runtime, dict), "contract runtime_compatibility missing", errors)
     if isinstance(runtime, dict):
