@@ -113,8 +113,7 @@
       "argv": ["bin/cline", "--version"],
       "environment": "native-minimal-isolated",
       "timeout_seconds": 60,
-      "timeout_policy": "fail-closed-before-software-swap",
-      "calibration_ref": "references/cline-baseline.json"
+      "timeout_policy": "fail-closed-before-software-swap"
     },
     "bounds": {
       "max_tree_paths": 50000,

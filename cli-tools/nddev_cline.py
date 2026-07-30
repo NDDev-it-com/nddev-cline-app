@@ -82,8 +82,6 @@ SOFTWARE_TREE_MAX_BYTES = 512 * 1024 * 1024
 SOFTWARE_TREE_MAX_PATHS = 50000
 PROCESS_OUTPUT_MAX_BYTES = 64 * 1024
 PROCESS_TIMEOUT_SECONDS = 120
-# Fresh cline@3.0.47 macOS arm64 stages measured 15.214s at the slowest.
-# references/cline-baseline.json owns the calibration evidence and public bound.
 VERSION_PROBE_TIMEOUT_SECONDS = 60
 SETUP_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 VERSION_PATTERN = re.compile(r"(?<![0-9])([0-9]+\.[0-9]+\.[0-9]+)(?![0-9])")

@@ -681,6 +681,17 @@ def validate_runtime_contract(errors: list[str]) -> None:
                 errors,
             )
             require(cli.get("version_probe", {}).get("timeout_seconds") == manager_literal(manager, "VERSION_PROBE_TIMEOUT_SECONDS", errors), "version probe timeout mismatch", errors)
+            require(
+                "calibration_ref" not in cli.get("version_probe", {}),
+                "version probe calibration provenance must remain private",
+                errors,
+            )
+    require(
+        "production_timeout_seconds"
+        not in baseline.get("cli", {}).get("version_probe", {}),
+        "baseline version probe calibration observation must remain private",
+        errors,
+    )
     lifecycle = manifest.get("software_lifecycle")
     if isinstance(transaction, dict):
         require(
