@@ -8,7 +8,6 @@ import hashlib
 import json
 import re
 import stat
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -329,21 +328,52 @@ def validate_versions(errors: list[str]) -> None:
     require(build.get("build_version") == version, "build version mismatch", errors)
     require(manifest.get("build_version") == version, "manifest version mismatch", errors)
     require(manifest.get("name") == contract.get("product_name"), "manifest name mismatch", errors)
-    require(build.get("node_minimum_major") == manager_literal(manager, "MIN_NODE_MAJOR", errors), "Node minimum mismatch", errors)
-    require(build.get("node_recommended_major") == manager_literal(manager, "RECOMMENDED_NODE_MAJOR", errors), "Node recommended mismatch", errors)
-    require(build.get("nddev_builder_extension_version") == version, "builder version mismatch", errors)
+    require(
+        build.get("node_minimum_major") == manager_literal(manager, "MIN_NODE_MAJOR", errors),
+        "Node minimum mismatch",
+        errors,
+    )
+    require(
+        build.get("node_recommended_major")
+        == manager_literal(manager, "RECOMMENDED_NODE_MAJOR", errors),
+        "Node recommended mismatch",
+        errors,
+    )
+    require(
+        build.get("nddev_builder_extension_version") == version, "builder version mismatch", errors
+    )
     cli_version = build.get("cline_cli_tested")
     cli_package = build.get("cline_cli_package")
     extension_version = build.get("cline_extension_tested")
     extension_id = build.get("vscode_extension_id")
-    require(cli_version == manager_literal(manager, "TESTED_CLI_VERSION", errors), "manager CLI version mismatch", errors)
-    require(cli_package == manager_literal(manager, "NPM_PACKAGE", errors), "manager CLI package mismatch", errors)
-    require(extension_version == manager_literal(manager, "TESTED_EXTENSION_VERSION", errors), "manager extension version mismatch", errors)
+    require(
+        cli_version == manager_literal(manager, "TESTED_CLI_VERSION", errors),
+        "manager CLI version mismatch",
+        errors,
+    )
+    require(
+        cli_package == manager_literal(manager, "NPM_PACKAGE", errors),
+        "manager CLI package mismatch",
+        errors,
+    )
+    require(
+        extension_version == manager_literal(manager, "TESTED_EXTENSION_VERSION", errors),
+        "manager extension version mismatch",
+        errors,
+    )
     install_env = build.get("npm_ci_lockfile_install_env")
     require(isinstance(install_env, list), "build npm install env list missing", errors)
     if isinstance(install_env, list):
-        require("NPM_CONFIG_IGNORE_SCRIPTS" in install_env, "build env must include NPM_CONFIG_IGNORE_SCRIPTS", errors)
-        require("NPM_CONFIG_BIN_LINKS" in install_env, "build env must include NPM_CONFIG_BIN_LINKS", errors)
+        require(
+            "NPM_CONFIG_IGNORE_SCRIPTS" in install_env,
+            "build env must include NPM_CONFIG_IGNORE_SCRIPTS",
+            errors,
+        )
+        require(
+            "NPM_CONFIG_BIN_LINKS" in install_env,
+            "build env must include NPM_CONFIG_BIN_LINKS",
+            errors,
+        )
     npm = baseline.get("npm")
     package_manager = baseline.get("package_manager")
     extension = baseline.get("extension")
@@ -353,9 +383,21 @@ def validate_versions(errors: list[str]) -> None:
     if isinstance(npm, dict):
         require(npm.get("version") == cli_version, "baseline npm version mismatch", errors)
         require(npm.get("package") == cli_package, "baseline npm package mismatch", errors)
-        require(npm.get("integrity") == build.get("cline_cli_integrity"), "baseline npm integrity mismatch", errors)
-        require(npm.get("shasum") == build.get("cline_cli_shasum"), "baseline npm shasum mismatch", errors)
-        require(isinstance(npm.get("tarball"), str) and str(cli_version) in npm["tarball"], "baseline npm tarball mismatch", errors)
+        require(
+            npm.get("integrity") == build.get("cline_cli_integrity"),
+            "baseline npm integrity mismatch",
+            errors,
+        )
+        require(
+            npm.get("shasum") == build.get("cline_cli_shasum"),
+            "baseline npm shasum mismatch",
+            errors,
+        )
+        require(
+            isinstance(npm.get("tarball"), str) and str(cli_version) in npm["tarball"],
+            "baseline npm tarball mismatch",
+            errors,
+        )
         optional = npm.get("optional_dependencies")
         require(isinstance(optional, dict), "baseline optional dependencies missing", errors)
         if isinstance(optional, dict):
@@ -372,15 +414,27 @@ def validate_versions(errors: list[str]) -> None:
             errors,
         )
         managed_argv = package_manager.get("managed_install_argv")
-        require(isinstance(managed_argv, list) and managed_argv[0:2] == ["npm", "ci"], "managed npm install argv mismatch", errors)
+        require(
+            isinstance(managed_argv, list) and managed_argv[0:2] == ["npm", "ci"],
+            "managed npm install argv mismatch",
+            errors,
+        )
         if isinstance(managed_argv, list):
             for flag in NPM_CI_REQUIRED_FLAGS:
                 require(flag in managed_argv, f"managed npm install argv missing {flag}", errors)
             for flag in NPM_CI_FORBIDDEN_FLAGS:
-                require(flag not in managed_argv, f"managed npm install argv must not contain {flag}", errors)
+                require(
+                    flag not in managed_argv,
+                    f"managed npm install argv must not contain {flag}",
+                    errors,
+                )
     if isinstance(extension, dict):
         require(extension.get("id") == extension_id, "baseline extension id mismatch", errors)
-        require(extension.get("version") == extension_version, "baseline extension version mismatch", errors)
+        require(
+            extension.get("version") == extension_version,
+            "baseline extension version mismatch",
+            errors,
+        )
     require(
         contract.get("software_install", {}).get("extension", {}).get("vsix_sha256")
         == build.get("vscode_extension_vsix_sha256"),
@@ -390,11 +444,27 @@ def validate_versions(errors: list[str]) -> None:
     runtime = contract.get("runtime_compatibility")
     require(isinstance(runtime, dict), "contract runtime_compatibility missing", errors)
     if isinstance(runtime, dict):
-        require(runtime.get("cli_tested_version") == cli_version, "contract CLI version mismatch", errors)
+        require(
+            runtime.get("cli_tested_version") == cli_version,
+            "contract CLI version mismatch",
+            errors,
+        )
         require(runtime.get("cli_package") == cli_package, "contract CLI package mismatch", errors)
-        require(runtime.get("extension_tested_version") == extension_version, "contract extension version mismatch", errors)
-        require(runtime.get("vscode_extension_id") == extension_id, "contract extension id mismatch", errors)
-        require("windows" in runtime.get("unsupported_platforms", []), "Windows must be unsupported", errors)
+        require(
+            runtime.get("extension_tested_version") == extension_version,
+            "contract extension version mismatch",
+            errors,
+        )
+        require(
+            runtime.get("vscode_extension_id") == extension_id,
+            "contract extension id mismatch",
+            errors,
+        )
+        require(
+            "windows" in runtime.get("unsupported_platforms", []),
+            "Windows must be unsupported",
+            errors,
+        )
 
 
 def validate_setups_and_profiles(errors: list[str]) -> None:
@@ -404,12 +474,18 @@ def validate_setups_and_profiles(errors: list[str]) -> None:
     require(manifest.get("profile_ids") == PROFILE_IDS, "manifest profile ids mismatch", errors)
     require(manifest.get("default_setup") == "nddev-builder", "default setup mismatch", errors)
     require(manifest.get("default_profile") == "full-auto", "default profile mismatch", errors)
-    require(set(manifest.get("managed_files", [])) == expected_managed_files(), "manifest managed files mismatch", errors)
+    require(
+        set(manifest.get("managed_files", [])) == expected_managed_files(),
+        "manifest managed files mismatch",
+        errors,
+    )
     setup_system = contract.get("setup_system")
     require(isinstance(setup_system, dict), "contract setup_system missing", errors)
     if isinstance(setup_system, dict):
         require(setup_system.get("setup_ids") == SETUP_IDS, "contract setup ids mismatch", errors)
-        require(setup_system.get("profile_ids") == PROFILE_IDS, "contract profile ids mismatch", errors)
+        require(
+            setup_system.get("profile_ids") == PROFILE_IDS, "contract profile ids mismatch", errors
+        )
         require("migrate" in setup_system.get("lifecycle", []), "migrate lifecycle missing", errors)
     setup = read_json("setups/nddev-builder/setup.json")
     settings = read_json("setups/nddev-builder/global-settings.json")
@@ -421,15 +497,24 @@ def validate_setups_and_profiles(errors: list[str]) -> None:
     safe = read_json("profiles/safe/profile.json")
     require(full_auto.get("default") is True, "full-auto must be default", errors)
     require(full_auto.get("sandbox") is False, "full-auto must not use Cline sandbox", errors)
-    require(full_auto.get("launch_args") == ["--auto-approve", "true"], "full-auto launch args mismatch", errors)
     require(
-        full_auto.get("command_permissions") == {"allow": ["*"], "deny": [], "allowRedirects": True},
+        full_auto.get("launch_args") == ["--auto-approve", "true"],
+        "full-auto launch args mismatch",
+        errors,
+    )
+    require(
+        full_auto.get("command_permissions")
+        == {"allow": ["*"], "deny": [], "allowRedirects": True},
         "full-auto command permissions mismatch",
         errors,
     )
     require(safe.get("default") is False, "safe must not be default", errors)
     require(safe.get("sandbox") is True, "safe must use Cline sandbox", errors)
-    require(safe.get("launch_args") == ["--plan", "--auto-approve", "false"], "safe launch args mismatch", errors)
+    require(
+        safe.get("launch_args") == ["--plan", "--auto-approve", "false"],
+        "safe launch args mismatch",
+        errors,
+    )
     require(
         safe.get("command_permissions") == {"allow": [], "deny": ["*"], "allowRedirects": False},
         "safe command permissions mismatch",
@@ -452,27 +537,57 @@ def validate_install_lock_assets(errors: list[str]) -> None:
     lock_digest = sha256_file(ROOT / "software/cline-cli/package-lock.json")
     expected_digest = build.get("cline_cli_lockfile_sha256")
     require(lock_digest == expected_digest, "build lockfile digest mismatch", errors)
-    require(baseline.get("package_manager", {}).get("lockfile_sha256") == lock_digest, "baseline lockfile digest mismatch", errors)
-    require(manifest.get("software_lifecycle", {}).get("lockfile_sha256") == lock_digest, "manifest lockfile digest mismatch", errors)
-    require(contract.get("software_install", {}).get("cli", {}).get("lockfile_sha256") == lock_digest, "contract lockfile digest mismatch", errors)
+    require(
+        baseline.get("package_manager", {}).get("lockfile_sha256") == lock_digest,
+        "baseline lockfile digest mismatch",
+        errors,
+    )
+    require(
+        manifest.get("software_lifecycle", {}).get("lockfile_sha256") == lock_digest,
+        "manifest lockfile digest mismatch",
+        errors,
+    )
+    require(
+        contract.get("software_install", {}).get("cli", {}).get("lockfile_sha256") == lock_digest,
+        "contract lockfile digest mismatch",
+        errors,
+    )
     cli_package = build.get("cline_cli_package")
     cli_version = build.get("cline_cli_tested")
     expected_dependency = {cli_package: cli_version}
-    require(package_json.get("dependencies") == expected_dependency, "install package.json root dependency mismatch", errors)
+    require(
+        package_json.get("dependencies") == expected_dependency,
+        "install package.json root dependency mismatch",
+        errors,
+    )
     packages = package_lock.get("packages")
-    require(package_lock.get("lockfileVersion") == 3, "package-lock lockfileVersion mismatch", errors)
+    require(
+        package_lock.get("lockfileVersion") == 3, "package-lock lockfileVersion mismatch", errors
+    )
     require(isinstance(packages, dict), "package-lock packages missing", errors)
     if not isinstance(packages, dict):
         return
     root = packages.get("")
     require(isinstance(root, dict), "package-lock root package missing", errors)
     if isinstance(root, dict):
-        require(root.get("dependencies") == expected_dependency, "package-lock root dependency mismatch", errors)
+        require(
+            root.get("dependencies") == expected_dependency,
+            "package-lock root dependency mismatch",
+            errors,
+        )
     cline_package = packages.get("node_modules/cline")
     require(isinstance(cline_package, dict), "package-lock cline package missing", errors)
     if isinstance(cline_package, dict):
-        require(cline_package.get("version") == cli_version, "package-lock cline package version mismatch", errors)
-        require(cline_package.get("bin") == {command_name: "bin/cline"}, "package-lock cline package wrapper bin mismatch", errors)
+        require(
+            cline_package.get("version") == cli_version,
+            "package-lock cline package version mismatch",
+            errors,
+        )
+        require(
+            cline_package.get("bin") == {command_name: "bin/cline"},
+            "package-lock cline package wrapper bin mismatch",
+            errors,
+        )
         require(
             cline_package.get("optionalDependencies")
             == {package: cli_version for package in optional_packages or ()},
@@ -483,18 +598,44 @@ def validate_install_lock_assets(errors: list[str]) -> None:
     optional_seen: set[str] = set()
     for package_path, metadata in packages.items():
         require(isinstance(package_path, str), "package-lock package key must be string", errors)
-        require(isinstance(metadata, dict), f"package-lock package {package_path} must be object", errors)
-        if not isinstance(package_path, str) or not isinstance(metadata, dict) or package_path == "":
+        require(
+            isinstance(metadata, dict),
+            f"package-lock package {package_path} must be object",
+            errors,
+        )
+        if (
+            not isinstance(package_path, str)
+            or not isinstance(metadata, dict)
+            or package_path == ""
+        ):
             continue
         package_name = package_path.removeprefix("node_modules/")
         if package_name in optional_expected:
             optional_seen = optional_seen | {package_name}
-            require(metadata.get("version") == cli_version, f"optional package {package_name} version mismatch", errors)
-            native_contract = native_packages.get(package_name) if isinstance(native_packages, dict) else None
+            require(
+                metadata.get("version") == cli_version,
+                f"optional package {package_name} version mismatch",
+                errors,
+            )
+            native_contract = (
+                native_packages.get(package_name) if isinstance(native_packages, dict) else None
+            )
             if native_contract is not None:
-                require(metadata.get("optional") is True, f"optional package {package_name} must be optional", errors)
-                require(metadata.get("os") == native_contract["os"], f"optional package {package_name} os selector mismatch", errors)
-                require(metadata.get("cpu") == native_contract["cpu"], f"optional package {package_name} cpu selector mismatch", errors)
+                require(
+                    metadata.get("optional") is True,
+                    f"optional package {package_name} must be optional",
+                    errors,
+                )
+                require(
+                    metadata.get("os") == native_contract["os"],
+                    f"optional package {package_name} os selector mismatch",
+                    errors,
+                )
+                require(
+                    metadata.get("cpu") == native_contract["cpu"],
+                    f"optional package {package_name} cpu selector mismatch",
+                    errors,
+                )
                 require(
                     metadata.get("bin") == {command_name: native_contract["bin"]},
                     f"optional package {package_name} bin mapping mismatch",
@@ -502,14 +643,30 @@ def validate_install_lock_assets(errors: list[str]) -> None:
                 )
         resolved = metadata.get("resolved")
         if isinstance(resolved, str):
-            require(isinstance(npm_registry, str) and resolved.startswith(npm_registry), f"non-registry resolved URL in lock: {package_path}", errors)
+            require(
+                isinstance(npm_registry, str) and resolved.startswith(npm_registry),
+                f"non-registry resolved URL in lock: {package_path}",
+                errors,
+            )
             lowered = resolved.lower()
-            require(not lowered.startswith(("git+", "file:", "http://")), f"unsafe resolved URL in lock: {package_path}", errors)
+            require(
+                not lowered.startswith(("git+", "file:", "http://")),
+                f"unsafe resolved URL in lock: {package_path}",
+                errors,
+            )
         elif metadata.get("link") is not True:
             require(False, f"resolved URL missing in lock: {package_path}", errors)
         if metadata.get("link") is not True:
-            require(isinstance(metadata.get("integrity"), str), f"integrity missing in lock: {package_path}", errors)
-    require(optional_seen == optional_expected, "optional Cline platform package set mismatch", errors)
+            require(
+                isinstance(metadata.get("integrity"), str),
+                f"integrity missing in lock: {package_path}",
+                errors,
+            )
+    require(
+        optional_seen == optional_expected, "optional Cline platform package set mismatch", errors
+    )
+
+
 def validate_builder(errors: list[str]) -> None:
     contract = read_json("config/nddev-contract.json")
     build = read_json("build/version.json")
@@ -518,17 +675,34 @@ def validate_builder(errors: list[str]) -> None:
     builder = contract.get("builder_capability")
     require(isinstance(builder, dict), "contract builder missing", errors)
     if isinstance(builder, dict):
-        require(builder.get("version") == build.get("nddev_builder_extension_version"), "builder version mismatch", errors)
-        require(builder.get("plugin_distribution") == "native cline.plugins package in home/.cline/plugins", "plugin distribution mismatch", errors)
+        require(
+            builder.get("version") == build.get("nddev_builder_extension_version"),
+            "builder version mismatch",
+            errors,
+        )
+        require(
+            builder.get("plugin_distribution")
+            == "native cline.plugins package in home/.cline/plugins",
+            "plugin distribution mismatch",
+            errors,
+        )
         require(builder.get("marketplace") is None, "builder marketplace must be null", errors)
     require(package_json.get("name") == "nddev-builder", "builder package name mismatch", errors)
-    require(package_json.get("version") == build.get("nddev_builder_extension_version"), "builder package version mismatch", errors)
+    require(
+        package_json.get("version") == build.get("nddev_builder_extension_version"),
+        "builder package version mismatch",
+        errors,
+    )
     require(package_json.get("type") == "module", "builder package must be ESM", errors)
     plugins = package_json.get("cline", {}).get("plugins")
     require(isinstance(plugins, list) and plugins, "builder package missing cline.plugins", errors)
     if isinstance(plugins, list) and plugins:
         require(plugins[0].get("paths") == ["./index.js"], "builder plugin path mismatch", errors)
-        require(plugins[0].get("capabilities") == ["tools"], "builder plugin capabilities mismatch", errors)
+        require(
+            plugins[0].get("capabilities") == ["tools"],
+            "builder plugin capabilities mismatch",
+            errors,
+        )
     for relative in (
         "plugins/nddev-builder/skills/nddev-builder/SKILL.md",
         "plugins/nddev-builder/skills/nddev-builder/references/native-paths.md",
@@ -538,9 +712,17 @@ def validate_builder(errors: list[str]) -> None:
         "plugins/nddev-builder/plugins/nddev-builder/index.js",
     ):
         require((ROOT / relative).is_file(), f"builder native file missing: {relative}", errors)
-    index = (ROOT / "plugins/nddev-builder/plugins/nddev-builder/index.js").read_text(encoding="utf-8")
-    require("export default plugin" in index, "builder plugin must export an AgentPlugin object", errors)
-    require("nddev_builder_read_reference" in index, "builder plugin missing regular-file adapter", errors)
+    index = (ROOT / "plugins/nddev-builder/plugins/nddev-builder/index.js").read_text(
+        encoding="utf-8"
+    )
+    require(
+        "export default plugin" in index, "builder plugin must export an AgentPlugin object", errors
+    )
+    require(
+        "nddev_builder_read_reference" in index,
+        "builder plugin missing regular-file adapter",
+        errors,
+    )
     local_reference_pattern = re.compile(r"`((?:\./)?references/[A-Za-z0-9._/-]+)`")
     for markdown in sorted(skill_root.rglob("*.md")):
         text = markdown.read_text(encoding="utf-8")
@@ -569,31 +751,112 @@ def validate_runtime_contract(errors: list[str]) -> None:
     build = read_json("build/version.json")
     baseline = read_json("references/cline-baseline.json")
     npm = baseline.get("npm")
-    require(manager_literal(manager, "NPM_PACKAGE", errors) == build.get("cline_cli_package"), "runtime npm package mismatch", errors)
-    require(manager_literal(manager, "TESTED_CLI_VERSION", errors) == build.get("cline_cli_tested"), "runtime npm version mismatch", errors)
-    require(manager_literal(manager, "DEFAULT_SETUP_ID", errors) == "nddev-builder", "runtime default setup mismatch", errors)
-    require(manager_literal(manager, "DEFAULT_PROFILE_ID", errors) == "full-auto", "runtime default profile mismatch", errors)
+    require(
+        manager_literal(manager, "NPM_PACKAGE", errors) == build.get("cline_cli_package"),
+        "runtime npm package mismatch",
+        errors,
+    )
+    require(
+        manager_literal(manager, "TESTED_CLI_VERSION", errors) == build.get("cline_cli_tested"),
+        "runtime npm version mismatch",
+        errors,
+    )
+    require(
+        manager_literal(manager, "DEFAULT_SETUP_ID", errors) == "nddev-builder",
+        "runtime default setup mismatch",
+        errors,
+    )
+    require(
+        manager_literal(manager, "DEFAULT_PROFILE_ID", errors) == "full-auto",
+        "runtime default profile mismatch",
+        errors,
+    )
     blocked_flags = manager_literal(manager, "BLOCKED_LAUNCH_FLAGS", errors)
-    require(isinstance(blocked_flags, (set, tuple, list)) and sorted(blocked_flags) == sorted(EXPECTED["blocked_launch_flags"]), "blocked launch flags mismatch", errors)
+    require(
+        isinstance(blocked_flags, (set, tuple, list))
+        and sorted(blocked_flags) == sorted(EXPECTED["blocked_launch_flags"]),
+        "blocked launch flags mismatch",
+        errors,
+    )
     require(isinstance(launch, dict), "runtime_launch missing", errors)
     require(isinstance(software, dict), "software_install missing", errors)
     require(isinstance(transaction, dict), "transaction_policy missing", errors)
     if isinstance(launch, dict):
-        require(launch.get("extension_launch_supported") is False, "extension launch must be unsupported", errors)
-        require(launch.get("extension_install_supported") is False, "extension install must be unsupported", errors)
-        require(launch.get("token_environment_inheritance") == "stripped", "tokens must be stripped", errors)
-        require(launch.get("executable_source") == "validated-target-owned-npm-ci-lockfile-install", "runtime executable source mismatch", errors)
-        require(launch.get("blocks_user_managed_flags") == EXPECTED["blocked_launch_flags"], "contract launch flag blocklist mismatch", errors)
-        require(launch.get("target_role") == "managed-configuration-runtime-home", "launch target role mismatch", errors)
-        require(launch.get("workspace_source") == "captured-caller-current-directory", "launch workspace source mismatch", errors)
-        require(launch.get("child_working_directory_policy") == "strict-resolved-caller-workspace", "launch cwd policy mismatch", errors)
-        require(launch.get("native_workspace_argument") == "--cwd", "launch native workspace argument mismatch", errors)
-        require("resolve_caller_workspace()" in source, "launch must resolve caller workspace at command entry", errors)
-        require('"--cwd",' in source and "cwd=str(workspace)" in source, "launch must bind native and process cwd", errors)
-        require('"launch_scope": launch_scope_status()' in source, "status must expose launch scope policy", errors)
-        require("legacy" in launch.get("legacy_launch_policy", ""), "legacy launch policy missing", errors)
-        require("lock_released_before_child" not in launch, "legacy launch lock release flag must not be present", errors)
-        require(launch.get("target_lifecycle_lock") == "held-through-child-completion", "launch lock scope mismatch", errors)
+        require(
+            launch.get("extension_launch_supported") is False,
+            "extension launch must be unsupported",
+            errors,
+        )
+        require(
+            launch.get("extension_install_supported") is False,
+            "extension install must be unsupported",
+            errors,
+        )
+        require(
+            launch.get("token_environment_inheritance") == "stripped",
+            "tokens must be stripped",
+            errors,
+        )
+        require(
+            launch.get("executable_source") == "validated-target-owned-npm-ci-lockfile-install",
+            "runtime executable source mismatch",
+            errors,
+        )
+        require(
+            launch.get("blocks_user_managed_flags") == EXPECTED["blocked_launch_flags"],
+            "contract launch flag blocklist mismatch",
+            errors,
+        )
+        require(
+            launch.get("target_role") == "managed-configuration-runtime-home",
+            "launch target role mismatch",
+            errors,
+        )
+        require(
+            launch.get("workspace_source") == "captured-caller-current-directory",
+            "launch workspace source mismatch",
+            errors,
+        )
+        require(
+            launch.get("child_working_directory_policy") == "strict-resolved-caller-workspace",
+            "launch cwd policy mismatch",
+            errors,
+        )
+        require(
+            launch.get("native_workspace_argument") == "--cwd",
+            "launch native workspace argument mismatch",
+            errors,
+        )
+        require(
+            "resolve_caller_workspace()" in source,
+            "launch must resolve caller workspace at command entry",
+            errors,
+        )
+        require(
+            '"--cwd",' in source and "cwd=str(workspace)" in source,
+            "launch must bind native and process cwd",
+            errors,
+        )
+        require(
+            '"launch_scope": launch_scope_status()' in source,
+            "status must expose launch scope policy",
+            errors,
+        )
+        require(
+            "legacy" in launch.get("legacy_launch_policy", ""),
+            "legacy launch policy missing",
+            errors,
+        )
+        require(
+            "lock_released_before_child" not in launch,
+            "legacy launch lock release flag must not be present",
+            errors,
+        )
+        require(
+            launch.get("target_lifecycle_lock") == "held-through-child-completion",
+            "launch lock scope mismatch",
+            errors,
+        )
         lock_policy = launch.get("target_lifecycle_lock_policy")
         require(
             isinstance(lock_policy, str)
@@ -604,24 +867,95 @@ def validate_runtime_contract(errors: list[str]) -> None:
             errors,
         )
         if isinstance(lock_policy, str):
-            require("fcntl.flock" in lock_policy, "launch lock policy must name fcntl.flock", errors)
-            require("O_NOFOLLOW" in lock_policy, "launch lock policy must name O_NOFOLLOW validation", errors)
-            require("write-protected verified-path handoff" in lock_policy, "launch handoff truth missing", errors)
-            require("not portable fd execution" in lock_policy, "launch policy must not claim portable fd execution", errors)
-            require("same-UID chmod" in lock_policy, "launch policy must disclose same-UID chmod boundary", errors)
-            require("dedicated target-internal lock directory" in lock_policy, "launch policy must use a dedicated lock directory", errors)
-            require("product global.lock" in lock_policy, "launch policy must use the product global lock", errors)
-            require("canonical-target anchor" in lock_policy, "launch policy must use canonical target anchors", errors)
-            require("Read-only status, plan, and software-status never create" in lock_policy, "launch policy must declare read-only no-create coordination", errors)
-            require("fixed resolved system temp root" in lock_policy, "launch policy must bind bootstrap lock to fixed system temp", errors)
-            require("never removed by normal lifecycle cleanup" in lock_policy, "launch policy must keep external anchors persistent", errors)
-            require("product external, canonical external, then internal" in lock_policy, "launch policy must document lock acquisition order", errors)
-            require("internal before canonical external" in lock_policy, "launch policy must document lock release order", errors)
-            require("renames the internal lock directory" in lock_policy, "launch policy must cover internal lock directory rename", errors)
-            require("bootstrap lock root" in lock_policy, "launch policy must disclose bootstrap root same-UID boundary", errors)
-            require("target root, HOME, config, TMP, XDG, runtime, and sandbox directories remain writable" in lock_policy, "launch policy must preserve runtime writability", errors)
-            require("--data-dir" not in launch.get("full_auto_command", ""), "full-auto command must not include --data-dir", errors)
-            require("CLINE_SANDBOX" not in launch.get("full_auto_command", ""), "full-auto command must not set sandbox env", errors)
+            require(
+                "fcntl.flock" in lock_policy, "launch lock policy must name fcntl.flock", errors
+            )
+            require(
+                "O_NOFOLLOW" in lock_policy,
+                "launch lock policy must name O_NOFOLLOW validation",
+                errors,
+            )
+            require(
+                "write-protected verified-path handoff" in lock_policy,
+                "launch handoff truth missing",
+                errors,
+            )
+            require(
+                "not portable fd execution" in lock_policy,
+                "launch policy must not claim portable fd execution",
+                errors,
+            )
+            require(
+                "same-UID chmod" in lock_policy,
+                "launch policy must disclose same-UID chmod boundary",
+                errors,
+            )
+            require(
+                "dedicated target-internal lock directory" in lock_policy,
+                "launch policy must use a dedicated lock directory",
+                errors,
+            )
+            require(
+                "product global.lock" in lock_policy,
+                "launch policy must use the product global lock",
+                errors,
+            )
+            require(
+                "canonical-target anchor" in lock_policy,
+                "launch policy must use canonical target anchors",
+                errors,
+            )
+            require(
+                "Read-only status, plan, and software-status never create" in lock_policy,
+                "launch policy must declare read-only no-create coordination",
+                errors,
+            )
+            require(
+                "fixed resolved system temp root" in lock_policy,
+                "launch policy must bind bootstrap lock to fixed system temp",
+                errors,
+            )
+            require(
+                "never removed by normal lifecycle cleanup" in lock_policy,
+                "launch policy must keep external anchors persistent",
+                errors,
+            )
+            require(
+                "product external, canonical external, then internal" in lock_policy,
+                "launch policy must document lock acquisition order",
+                errors,
+            )
+            require(
+                "internal before canonical external" in lock_policy,
+                "launch policy must document lock release order",
+                errors,
+            )
+            require(
+                "renames the internal lock directory" in lock_policy,
+                "launch policy must cover internal lock directory rename",
+                errors,
+            )
+            require(
+                "bootstrap lock root" in lock_policy,
+                "launch policy must disclose bootstrap root same-UID boundary",
+                errors,
+            )
+            require(
+                "target root, HOME, config, TMP, XDG, runtime, and sandbox directories remain writable"
+                in lock_policy,
+                "launch policy must preserve runtime writability",
+                errors,
+            )
+            require(
+                "--data-dir" not in launch.get("full_auto_command", ""),
+                "full-auto command must not include --data-dir",
+                errors,
+            )
+            require(
+                "CLINE_SANDBOX" not in launch.get("full_auto_command", ""),
+                "full-auto command must not set sandbox env",
+                errors,
+            )
             require(
                 "cleanup is pending" in source,
                 "launch must fail closed while cleanup is pending",
@@ -630,20 +964,44 @@ def validate_runtime_contract(errors: list[str]) -> None:
     if isinstance(software, dict):
         cli = software.get("cli")
         extension = software.get("extension")
-        require(isinstance(cli, dict) and cli.get("supported") is True, "CLI install must be supported", errors)
-        require(isinstance(extension, dict) and extension.get("supported") is False, "extension install must be unsupported", errors)
+        require(
+            isinstance(cli, dict) and cli.get("supported") is True,
+            "CLI install must be supported",
+            errors,
+        )
+        require(
+            isinstance(extension, dict) and extension.get("supported") is False,
+            "extension install must be unsupported",
+            errors,
+        )
         if isinstance(cli, dict):
             require(cli.get("package_manager") == "npm", "CLI package manager must be npm", errors)
-            require(cli.get("registry") == manager_literal(manager, "NPM_REGISTRY", errors), "npm registry mismatch", errors)
-            require(cli.get("lockfile_sha256") == build.get("cline_cli_lockfile_sha256"), "contract CLI lock digest mismatch", errors)
-            require(cli.get("install_argv", [None])[0:2] == ["npm", "ci"], "contract install argv must use npm ci", errors)
+            require(
+                cli.get("registry") == manager_literal(manager, "NPM_REGISTRY", errors),
+                "npm registry mismatch",
+                errors,
+            )
+            require(
+                cli.get("lockfile_sha256") == build.get("cline_cli_lockfile_sha256"),
+                "contract CLI lock digest mismatch",
+                errors,
+            )
+            require(
+                cli.get("install_argv", [None])[0:2] == ["npm", "ci"],
+                "contract install argv must use npm ci",
+                errors,
+            )
             install_argv = cli.get("install_argv")
             require(isinstance(install_argv, list), "contract install argv must be a list", errors)
             if isinstance(install_argv, list):
                 for flag in NPM_CI_REQUIRED_FLAGS:
                     require(flag in install_argv, f"contract install argv missing {flag}", errors)
                 for flag in NPM_CI_FORBIDDEN_FLAGS:
-                    require(flag not in install_argv, f"contract install argv must not contain {flag}", errors)
+                    require(
+                        flag not in install_argv,
+                        f"contract install argv must not contain {flag}",
+                        errors,
+                    )
             lockfile_preflight = cli.get("lockfile_preflight")
             require(
                 isinstance(lockfile_preflight, dict)
@@ -651,21 +1009,51 @@ def validate_runtime_contract(errors: list[str]) -> None:
                 "contract lockfile preflight must check cline package wrapper bin mapping",
                 errors,
             )
-            require(cli.get("lifecycle_scripts") == "disabled", "contract lifecycle script policy mismatch", errors)
-            require(cli.get("bin_links") == "disabled", "contract bin-links policy mismatch", errors)
+            require(
+                cli.get("lifecycle_scripts") == "disabled",
+                "contract lifecycle script policy mismatch",
+                errors,
+            )
+            require(
+                cli.get("bin_links") == "disabled", "contract bin-links policy mismatch", errors
+            )
             environment_policy = cli.get("environment_policy")
-            require(isinstance(environment_policy, dict), "contract environment policy missing", errors)
+            require(
+                isinstance(environment_policy, dict), "contract environment policy missing", errors
+            )
             if isinstance(environment_policy, dict):
                 required_env = environment_policy.get("required")
-                require(isinstance(required_env, list), "contract required env list missing", errors)
+                require(
+                    isinstance(required_env, list), "contract required env list missing", errors
+                )
                 if isinstance(required_env, list):
-                    require("NPM_CONFIG_IGNORE_SCRIPTS" in required_env, "contract env must require NPM_CONFIG_IGNORE_SCRIPTS", errors)
-                    require("NPM_CONFIG_BIN_LINKS" in required_env, "contract env must require NPM_CONFIG_BIN_LINKS", errors)
+                    require(
+                        "NPM_CONFIG_IGNORE_SCRIPTS" in required_env,
+                        "contract env must require NPM_CONFIG_IGNORE_SCRIPTS",
+                        errors,
+                    )
+                    require(
+                        "NPM_CONFIG_BIN_LINKS" in required_env,
+                        "contract env must require NPM_CONFIG_BIN_LINKS",
+                        errors,
+                    )
             if isinstance(npm, dict):
                 registry_metadata = cli.get("registry_metadata", {})
-                require(registry_metadata.get("integrity") == npm.get("integrity"), "registry integrity mismatch", errors)
-                require(registry_metadata.get("shasum") == npm.get("shasum"), "registry shasum mismatch", errors)
-                require(registry_metadata.get("tarball") == npm.get("tarball"), "registry tarball mismatch", errors)
+                require(
+                    registry_metadata.get("integrity") == npm.get("integrity"),
+                    "registry integrity mismatch",
+                    errors,
+                )
+                require(
+                    registry_metadata.get("shasum") == npm.get("shasum"),
+                    "registry shasum mismatch",
+                    errors,
+                )
+                require(
+                    registry_metadata.get("tarball") == npm.get("tarball"),
+                    "registry tarball mismatch",
+                    errors,
+                )
             require(
                 cli.get("node_preflight")
                 == {
@@ -675,7 +1063,11 @@ def validate_runtime_contract(errors: list[str]) -> None:
                 "Node preflight mismatch",
                 errors,
             )
-            wrapper = ast.unparse(manager.get("PACKAGE_WRAPPER_RELATIVE")) if manager.get("PACKAGE_WRAPPER_RELATIVE") is not None else ""
+            wrapper = (
+                ast.unparse(manager.get("PACKAGE_WRAPPER_RELATIVE"))
+                if manager.get("PACKAGE_WRAPPER_RELATIVE") is not None
+                else ""
+            )
             require(
                 all(
                     token in wrapper
@@ -689,22 +1081,27 @@ def validate_runtime_contract(errors: list[str]) -> None:
                 "manager package wrapper source mismatch",
                 errors,
             )
-            require(cli.get("version_probe", {}).get("timeout_seconds") == manager_literal(manager, "VERSION_PROBE_TIMEOUT_SECONDS", errors), "version probe timeout mismatch", errors)
+            require(
+                cli.get("version_probe", {}).get("timeout_seconds")
+                == manager_literal(manager, "VERSION_PROBE_TIMEOUT_SECONDS", errors),
+                "version probe timeout mismatch",
+                errors,
+            )
             require(
                 "calibration_ref" not in cli.get("version_probe", {}),
                 "version probe calibration provenance must remain private",
                 errors,
             )
     require(
-        "production_timeout_seconds"
-        not in baseline.get("cli", {}).get("version_probe", {}),
+        "production_timeout_seconds" not in baseline.get("cli", {}).get("version_probe", {}),
         "baseline version probe calibration observation must remain private",
         errors,
     )
     lifecycle = manifest.get("software_lifecycle")
     if isinstance(transaction, dict):
         require(
-            transaction.get("cleanup_journal_schema") == manager_literal(manager, "CLEANUP_SCHEMA_VERSION", errors),
+            transaction.get("cleanup_journal_schema")
+            == manager_literal(manager, "CLEANUP_SCHEMA_VERSION", errors),
             "contract cleanup journal schema mismatch",
             errors,
         )
@@ -718,19 +1115,38 @@ def validate_runtime_contract(errors: list[str]) -> None:
         )
     require(isinstance(lifecycle, dict), "manifest software_lifecycle missing", errors)
     if isinstance(lifecycle, dict):
-        require(lifecycle.get("install_argv", [None])[0:2] == ["npm", "ci"], "manifest install argv must use npm ci", errors)
-        require(lifecycle.get("lockfile_sha256") == build.get("cline_cli_lockfile_sha256"), "manifest lock digest mismatch", errors)
+        require(
+            lifecycle.get("install_argv", [None])[0:2] == ["npm", "ci"],
+            "manifest install argv must use npm ci",
+            errors,
+        )
+        require(
+            lifecycle.get("lockfile_sha256") == build.get("cline_cli_lockfile_sha256"),
+            "manifest lock digest mismatch",
+            errors,
+        )
         install_argv = lifecycle.get("install_argv")
         require(isinstance(install_argv, list), "manifest install argv must be a list", errors)
         if isinstance(install_argv, list):
             for flag in NPM_CI_REQUIRED_FLAGS:
                 require(flag in install_argv, f"manifest install argv missing {flag}", errors)
             for flag in NPM_CI_FORBIDDEN_FLAGS:
-                require(flag not in install_argv, f"manifest install argv must not contain {flag}", errors)
-        require(lifecycle.get("lifecycle_scripts") == "disabled", "manifest lifecycle script policy mismatch", errors)
-        require(lifecycle.get("bin_links") == "disabled", "manifest bin-links policy mismatch", errors)
+                require(
+                    flag not in install_argv,
+                    f"manifest install argv must not contain {flag}",
+                    errors,
+                )
         require(
-            lifecycle.get("cleanup_journal_schema") == manager_literal(manager, "CLEANUP_SCHEMA_VERSION", errors),
+            lifecycle.get("lifecycle_scripts") == "disabled",
+            "manifest lifecycle script policy mismatch",
+            errors,
+        )
+        require(
+            lifecycle.get("bin_links") == "disabled", "manifest bin-links policy mismatch", errors
+        )
+        require(
+            lifecycle.get("cleanup_journal_schema")
+            == manager_literal(manager, "CLEANUP_SCHEMA_VERSION", errors),
             "manifest cleanup journal schema mismatch",
             errors,
         )
@@ -746,7 +1162,11 @@ def validate_runtime_contract(errors: list[str]) -> None:
             f"Node.js {manager_literal(manager, 'MIN_NODE_MAJOR', errors)}+ required; "
             f"{manager_literal(manager, 'RECOMMENDED_NODE_MAJOR', errors)} recommended"
         )
-        require(lifecycle.get("node_preflight") == expected_node_preflight, "manifest Node preflight mismatch", errors)
+        require(
+            lifecycle.get("node_preflight") == expected_node_preflight,
+            "manifest Node preflight mismatch",
+            errors,
+        )
         handoff = lifecycle.get("launch_handoff_policy")
         require(
             isinstance(handoff, str)
@@ -756,15 +1176,26 @@ def validate_runtime_contract(errors: list[str]) -> None:
             and "no-create" in handoff
             and "fixed system temp" in handoff
             and "acquisition product external/canonical external/internal" in handoff
-            and "mutable target, HOME, config, TMP, XDG, runtime, and sandbox directories stay writable" in handoff,
+            and "mutable target, HOME, config, TMP, XDG, runtime, and sandbox directories stay writable"
+            in handoff,
             "manifest launch handoff policy mismatch",
             errors,
         )
         bounds = lifecycle.get("bounds")
         require(isinstance(bounds, dict), "manifest software bounds missing", errors)
         if isinstance(bounds, dict):
-            require(bounds.get("max_tree_paths") == manager_positive_integer(manager, "SOFTWARE_TREE_MAX_PATHS", errors), "software path bound mismatch", errors)
-            require(bounds.get("max_tree_bytes") == manager_positive_integer(manager, "SOFTWARE_TREE_MAX_BYTES", errors), "software byte bound mismatch", errors)
+            require(
+                bounds.get("max_tree_paths")
+                == manager_positive_integer(manager, "SOFTWARE_TREE_MAX_PATHS", errors),
+                "software path bound mismatch",
+                errors,
+            )
+            require(
+                bounds.get("max_tree_bytes")
+                == manager_positive_integer(manager, "SOFTWARE_TREE_MAX_BYTES", errors),
+                "software byte bound mismatch",
+                errors,
+            )
 
 
 def validate_bootstrap_lock_contract(errors: list[str]) -> None:
@@ -786,7 +1217,9 @@ def validate_bootstrap_lock_contract(errors: list[str]) -> None:
         "bootstrap lock root source contract mismatch",
         errors,
     )
-    require("gettempdir(" not in source, "bootstrap lock root must not use tempfile.gettempdir", errors)
+    require(
+        "gettempdir(" not in source, "bootstrap lock root must not use tempfile.gettempdir", errors
+    )
     for name in FORBIDDEN_BOOTSTRAP_OVERRIDE_NAMES:
         require(name not in source, f"public bootstrap override must not exist: {name}", errors)
 
@@ -814,19 +1247,36 @@ def validate_current_sources(errors: list[str]) -> None:
         "https://docs.npmjs.com/cli/v11/configuring-npm/package-lock-json/",
         "https://registry.npmjs.org/cline/latest",
     }
-    require(required.issubset(set(sources)), "current official source set missing required sources", errors)
+    require(
+        required.issubset(set(sources)),
+        "current official source set missing required sources",
+        errors,
+    )
 
 
 def validate_absence_of_placeholders(errors: list[str]) -> None:
     for path in ROOT.rglob("*"):
-        if ".git" in path.parts or "__pycache__" in path.parts or path.is_dir() or path.suffix == ".pyc":
+        if (
+            ".git" in path.parts
+            or "__pycache__" in path.parts
+            or path.is_dir()
+            or path.suffix == ".pyc"
+        ):
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         lowered = text.lower()
-        require(PLACEHOLDER_MARKER not in lowered, f"placeholder marker found in {path.relative_to(ROOT)}", errors)
+        require(
+            PLACEHOLDER_MARKER not in lowered,
+            f"placeholder marker found in {path.relative_to(ROOT)}",
+            errors,
+        )
     setup_payload = (ROOT / "setups/nddev-builder/global-settings.json").read_text(encoding="utf-8")
     for forbidden in ("dangerousActions", "allowRemoteMcp", "sandbox.mode"):
-        require(forbidden not in setup_payload, f"unproven settings key found in setup payload: {forbidden}", errors)
+        require(
+            forbidden not in setup_payload,
+            f"unproven settings key found in setup payload: {forbidden}",
+            errors,
+        )
 
 
 def validate_shared_ci(errors: list[str]) -> None:
@@ -855,7 +1305,9 @@ def validate_release_workflow(errors: list[str]) -> None:
         f"release-supply-chain.yml@{SHARED_CI_COMMIT} # {SHARED_CI_VERSION}"
     )
     require(text.count(expected_use) == 1, "release workflow shared pin mismatch", errors)
-    require("permissions: {}" in text, "release workflow top-level permissions must be empty", errors)
+    require(
+        "permissions: {}" in text, "release workflow top-level permissions must be empty", errors
+    )
     publish_permissions = _workflow_block(text, "    permissions:")
     require(
         _workflow_scalar_mapping(publish_permissions) == REQUIRED_RELEASE_PERMISSIONS,
@@ -889,9 +1341,21 @@ def validate_release_workflow(errors: list[str]) -> None:
     runtime_paths = _workflow_with_value(text, "runtime_paths")
     require(archive_paths == RELEASE_ARCHIVE_PATHS, "release archive_paths mismatch", errors)
     require(runtime_paths == RELEASE_RUNTIME_PATHS, "release runtime_paths mismatch", errors)
-    require(set(runtime_paths).issubset(set(archive_paths)), "runtime paths must be a subset of archive paths", errors)
-    require(REQUIRED_CONTRACT_ROOTS.issubset(set(archive_paths)), "archive paths missing contract roots", errors)
-    require(REQUIRED_CONTRACT_ROOTS.issubset(set(runtime_paths)), "runtime paths missing contract roots", errors)
+    require(
+        set(runtime_paths).issubset(set(archive_paths)),
+        "runtime paths must be a subset of archive paths",
+        errors,
+    )
+    require(
+        REQUIRED_CONTRACT_ROOTS.issubset(set(archive_paths)),
+        "archive paths missing contract roots",
+        errors,
+    )
+    require(
+        REQUIRED_CONTRACT_ROOTS.issubset(set(runtime_paths)),
+        "runtime paths missing contract roots",
+        errors,
+    )
     require(
         REQUIRED_GOVERNANCE_ARCHIVE_PATHS.issubset(set(archive_paths)),
         "archive paths missing governance source roots",
@@ -912,9 +1376,7 @@ def validate_release_workflow(errors: list[str]) -> None:
         require(path.exists(), f"release path does not exist: {declared}", errors)
         validate_no_symlinks_under(path, f"release path {declared}", errors)
         covered = [
-            item
-            for item in inventory
-            if item == declared or item.startswith(f"{declared}/")
+            item for item in inventory if item == declared or item.startswith(f"{declared}/")
         ]
         require(bool(covered), f"release path has no packaged files: {declared}", errors)
         for marker in PRIVATE_PATH_MARKERS:
@@ -926,7 +1388,11 @@ def validate_release_workflow(errors: list[str]) -> None:
     for item in sorted(inventory):
         parts = Path(item).parts
         for marker in PRIVATE_PATH_MARKERS:
-            require(marker not in parts, f"tracked public path contains private marker {marker}: {item}", errors)
+            require(
+                marker not in parts,
+                f"tracked public path contains private marker {marker}: {item}",
+                errors,
+            )
         require(
             _path_is_covered(item, archive_paths),
             f"artifact path is outside release archive_paths closure: {item}",
