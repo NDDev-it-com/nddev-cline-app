@@ -793,6 +793,11 @@ def validate_bootstrap_lock_contract(errors: list[str]) -> None:
 
 def validate_current_sources(errors: list[str]) -> None:
     baseline = read_json("references/cline-baseline.json")
+    require(
+        "captured_at" not in baseline,
+        "baseline contains observation-only captured_at",
+        errors,
+    )
     sources = baseline.get("sources")
     require(isinstance(sources, list), "baseline sources missing", errors)
     if not isinstance(sources, list):

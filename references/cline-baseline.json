@@ -1,6 +1,5 @@
 {
   "schema_version": 1,
-  "captured_at": "2026-07-29",
   "product": "Cline",
   "cli": {
     "command": "cline",
