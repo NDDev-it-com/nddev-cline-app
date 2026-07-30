@@ -52,7 +52,7 @@
   "builder_capability": {
     "projection": "cline-native-skills-yaml-agent-plugin-rules-user-files",
     "source_root": "plugins/nddev-builder",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "native_paths": [
       "home/.cline/skills/nddev-builder/SKILL.md",
       "home/.cline/skills/nddev-builder/references",
@@ -69,8 +69,8 @@
   },
   "runtime_launch": {
     "command": "<absolute-target>/bin/cline",
-    "full_auto_command": "HOME=<absolute-target>/home CLINE_COMMAND_PERMISSIONS=<allow-all-policy> <absolute-target>/bin/cline --auto-approve true --config <absolute-target>/home/.cline/data/settings --hooks-dir <absolute-target>/home/.cline/hooks [args...]",
-    "safe_command": "HOME=<absolute-target>/home CLINE_SANDBOX=1 CLINE_COMMAND_PERMISSIONS=<deny-all-policy> <absolute-target>/bin/cline --plan --auto-approve false --config <absolute-target>/home/.cline/data/settings --hooks-dir <absolute-target>/home/.cline/hooks --data-dir <absolute-target>/sandbox [args...]",
+    "full_auto_command": "HOME=<absolute-target>/home CLINE_COMMAND_PERMISSIONS=<allow-all-policy> <absolute-target>/bin/cline --auto-approve true --config <absolute-target>/home/.cline/data/settings --hooks-dir <absolute-target>/home/.cline/hooks --cwd <resolved-caller-workspace> [args...]",
+    "safe_command": "HOME=<absolute-target>/home CLINE_SANDBOX=1 CLINE_COMMAND_PERMISSIONS=<deny-all-policy> <absolute-target>/bin/cline --plan --auto-approve false --config <absolute-target>/home/.cline/data/settings --hooks-dir <absolute-target>/home/.cline/hooks --cwd <resolved-caller-workspace> --data-dir <absolute-target>/sandbox [args...]",
     "permissions_environment_variable": "CLINE_COMMAND_PERMISSIONS",
     "executable_source": "validated-target-owned-npm-ci-lockfile-install",
     "extension_launch_supported": false,
@@ -80,10 +80,15 @@
     "forwards_child_exit_code": true,
     "json_manager_errors_supported": true,
     "manager_command": "python3 cli-tools/nddev_cline.py launch --target <absolute-target> -- [args...]",
+    "target_role": "managed-configuration-runtime-home",
+    "workspace_source": "captured-caller-current-directory",
+    "child_working_directory_policy": "strict-resolved-caller-workspace",
+    "native_workspace_argument": "--cwd",
     "requires_clean_managed_target": true,
     "blocks_user_managed_flags": [
       "--auto-approve",
       "--config",
+      "--cwd",
       "--data-dir",
       "--hooks-dir",
       "--key",
@@ -91,6 +96,7 @@
       "--provider",
       "--yolo",
       "--zen",
+      "-c",
       "-k"
     ],
     "target_lifecycle_lock": "held-through-child-completion",

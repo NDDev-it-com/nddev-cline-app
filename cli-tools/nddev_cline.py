@@ -246,6 +246,7 @@ DETERMINISTIC_PATH = os.pathsep.join(TRUSTED_TOOL_PATHS)
 BLOCKED_LAUNCH_FLAGS = {
     "--auto-approve",
     "--config",
+    "--cwd",
     "--data-dir",
     "--hooks-dir",
     "--key",
@@ -253,6 +254,7 @@ BLOCKED_LAUNCH_FLAGS = {
     "--provider",
     "--yolo",
     "--zen",
+    "-c",
     "-k",
 }
 
@@ -4189,13 +4191,37 @@ def isolated_child_environment(
 def validate_launch_args(args: list[str]) -> None:
     for arg in args:
         flag = arg.split("=", 1)[0]
-        if flag in BLOCKED_LAUNCH_FLAGS or arg.startswith("-k=") or (
-            arg.startswith("-k") and arg != "-k" and not arg.startswith("--")
-        ):
+        attached_short_override = any(
+            arg.startswith(short_flag) and arg != short_flag and not arg.startswith("--")
+            for short_flag in ("-c", "-k")
+        )
+        if flag in BLOCKED_LAUNCH_FLAGS or attached_short_override:
             fail(f"launch argument {flag!r} is managed by nddev-cline-app")
 
 
-def launch_cline(target: Path, args: list[str]) -> int:
+def resolve_caller_workspace() -> Path:
+    try:
+        workspace = Path.cwd().resolve(strict=True)
+        info = workspace.stat()
+    except (FileNotFoundError, OSError) as exc:
+        fail(f"cannot resolve caller workspace: {exc}")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("caller workspace must resolve to a directory")
+    if not os.access(workspace, os.R_OK | os.X_OK):
+        fail("caller workspace must be readable and searchable")
+    return workspace
+
+
+def launch_scope_status() -> dict[str, str]:
+    return {
+        "target_role": "managed-configuration-runtime-home",
+        "workspace_source": "captured-caller-current-directory",
+        "child_working_directory_policy": "strict-resolved-caller-workspace",
+        "native_workspace_argument": "--cwd",
+    }
+
+
+def launch_cline(target: Path, workspace: Path, args: list[str]) -> int:
     require_supported_runtime_platform()
     validate_launch_args(args)
     with locked_existing_target(target) as canonical_target:
@@ -4223,6 +4249,8 @@ def launch_cline(target: Path, args: list[str]) -> int:
             str(canonical_target / CLINE_CONFIG_RELATIVE),
             "--hooks-dir",
             str(canonical_target / CLINE_HOOKS_RELATIVE),
+            "--cwd",
+            str(workspace),
         ]
         if profile_id == "safe":
             child_args.extend(["--data-dir", str(canonical_target / CLINE_SANDBOX_RELATIVE)])
@@ -4237,7 +4265,7 @@ def launch_cline(target: Path, args: list[str]) -> int:
             revalidate_launch_handoff(canonical_target, manifest)
             completed = subprocess.run(
                 [str(executable), *child_args],
-                cwd=os.getcwd(),
+                cwd=str(workspace),
                 env=child_env,
                 check=False,
                 timeout=None,
@@ -4318,7 +4346,14 @@ def run(args: argparse.Namespace) -> int:
         return 0
     if args.command == "status":
         target = require_absolute_target_argument(args.target)
-        print_payload({"ok": True, **inspect_target_with_locks(target)}, json_output=args.json)
+        print_payload(
+            {
+                "ok": True,
+                **inspect_target_with_locks(target),
+                "launch_scope": launch_scope_status(),
+            },
+            json_output=args.json,
+        )
         return 0
     if args.command == "software-status":
         target = require_absolute_target_argument(args.target)
@@ -4356,11 +4391,12 @@ def run(args: argparse.Namespace) -> int:
         print_payload(install_or_update_cli(target, operation="update-cli"), json_output=args.json)
         return 0
     if args.command == "launch":
+        workspace = resolve_caller_workspace()
         target = require_absolute_target_argument(args.target)
         cline_args = list(args.cline_args)
         if cline_args and cline_args[0] == "--":
             cline_args = cline_args[1:]
-        return launch_cline(target, cline_args)
+        return launch_cline(target, workspace, cline_args)
     fail(f"unknown command: {args.command}")
 
 

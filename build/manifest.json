@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "name": "nddev-cline-app",
-  "build_version": "0.2.0",
+  "build_version": "0.2.1",
   "entrypoint": "python3 cli-tools/nddev_cline.py",
   "source_root": "setups",
   "setup_ids": ["nddev-builder"],
@@ -107,7 +107,11 @@
     "cleanup_pending": "valid cleanup-pending state is reported by read-only commands, launch fails closed while it exists, and the next mutating command drains it before active changes",
     "cleanup_journal_schema": 2,
     "partial_state_policy": "install rejects any replace path or owned software parent; update may repair safe partial state",
-    "launch_handoff_policy": "monotonic product global.lock and canonical-target O_NOFOLLOW fcntl anchors under fixed system temp per-product/per-UID private root; read-only commands open existing anchors no-create; launch additionally holds a target-internal O_NOFOLLOW fcntl lock file below a dedicated lock directory through child completion; acquisition product external/canonical external/internal and release internal before canonical external; only the internal lock directory and immutable executable/software artifact directories are temporarily read/execute-only while mutable target, HOME, config, TMP, XDG, runtime, and sandbox directories stay writable; manifest is current before protection; entrypoint and package-wrapper identities plus O_NOFOLLOW SHA-256 byte digests are revalidated immediately before path-based spawn",
+    "launch_handoff_policy": "monotonic product global.lock and canonical-target O_NOFOLLOW fcntl anchors under fixed system temp per-product/per-UID private root; read-only commands open existing anchors no-create; launch captures and strictly resolves the caller current directory once as the project workspace, binds both child cwd and native --cwd to it, and additionally holds a target-internal O_NOFOLLOW fcntl lock file below a dedicated lock directory through child completion; acquisition product external/canonical external/internal and release internal before canonical external; only the internal lock directory and immutable executable/software artifact directories are temporarily read/execute-only while mutable target, HOME, config, TMP, XDG, runtime, and sandbox directories stay writable; manifest is current before protection; entrypoint and package-wrapper identities plus O_NOFOLLOW SHA-256 byte digests are revalidated immediately before path-based spawn",
+    "target_role": "managed-configuration-runtime-home",
+    "workspace_source": "captured-caller-current-directory",
+    "child_working_directory_policy": "strict-resolved-caller-workspace",
+    "native_workspace_argument": "--cwd",
     "current_idempotent": true,
     "version_probe": {
       "argv": ["bin/cline", "--version"],

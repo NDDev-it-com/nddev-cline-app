@@ -112,6 +112,7 @@ EXPECTED = {
     "blocked_launch_flags": [
         "--auto-approve",
         "--config",
+        "--cwd",
         "--data-dir",
         "--hooks-dir",
         "--key",
@@ -119,6 +120,7 @@ EXPECTED = {
         "--provider",
         "--yolo",
         "--zen",
+        "-c",
         "-k",
     ],
 }
@@ -582,6 +584,13 @@ def validate_runtime_contract(errors: list[str]) -> None:
         require(launch.get("token_environment_inheritance") == "stripped", "tokens must be stripped", errors)
         require(launch.get("executable_source") == "validated-target-owned-npm-ci-lockfile-install", "runtime executable source mismatch", errors)
         require(launch.get("blocks_user_managed_flags") == EXPECTED["blocked_launch_flags"], "contract launch flag blocklist mismatch", errors)
+        require(launch.get("target_role") == "managed-configuration-runtime-home", "launch target role mismatch", errors)
+        require(launch.get("workspace_source") == "captured-caller-current-directory", "launch workspace source mismatch", errors)
+        require(launch.get("child_working_directory_policy") == "strict-resolved-caller-workspace", "launch cwd policy mismatch", errors)
+        require(launch.get("native_workspace_argument") == "--cwd", "launch native workspace argument mismatch", errors)
+        require("resolve_caller_workspace()" in source, "launch must resolve caller workspace at command entry", errors)
+        require('"--cwd",' in source and "cwd=str(workspace)" in source, "launch must bind native and process cwd", errors)
+        require('"launch_scope": launch_scope_status()' in source, "status must expose launch scope policy", errors)
         require("legacy" in launch.get("legacy_launch_policy", ""), "legacy launch policy missing", errors)
         require("lock_released_before_child" not in launch, "legacy launch lock release flag must not be present", errors)
         require(launch.get("target_lifecycle_lock") == "held-through-child-completion", "launch lock scope mismatch", errors)

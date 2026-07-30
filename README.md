@@ -124,6 +124,12 @@ is not portable fd execution; without a native sandbox it does not claim
 resistance to deliberate same-UID tampering of the bootstrap lock root or
 deliberate same-UID `chmod` attacks.
 
+At launch-command entry, the manager captures the caller's current directory
+once, strictly resolves it as an existing accessible project workspace, and
+passes that same path as both the child process working directory and Cline's
+manager-owned `--cwd` argument. The managed target remains the isolated
+configuration and runtime home. Forwarded `--cwd` and `-c` forms are rejected.
+
 Legacy 0.1.0 managed targets may be inspected, migrated, restored, or removed.
 They are never launched.
 

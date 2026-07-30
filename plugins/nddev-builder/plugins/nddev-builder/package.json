@@ -1,6 +1,6 @@
 {
   "name": "nddev-builder",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "NDDev Cline builder local read-only plugin.",
   "private": true,
   "type": "module",
