@@ -63,7 +63,7 @@
   "runtime_compatibility": {
     "baseline_ref": "references/cline-baseline.json",
     "version_ref": "build/version.json",
-    "cli_tested_version": "3.0.47",
+    "cli_tested_version": "3.0.48",
     "cli_package": "cline",
     "cli_command": "cline",
     "extension_tested_version": "4.0.12",
@@ -76,7 +76,7 @@
       "software/cline-cli/package.json",
       "software/cline-cli/package-lock.json"
     ],
-    "lockfile_sha256": "0fc2629ceabe085f38b08fc90609e2056beb5dea82adbf7a01b6e3d46251db73",
+    "lockfile_sha256": "4118153e3838238453d40693d8c2e448ac45256611dbe4871e29539611d9ced6",
     "install_argv": [
       "npm",
       "ci",

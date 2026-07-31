@@ -4,7 +4,7 @@
   "cli": {
     "command": "cline",
     "package": "cline",
-    "version": "3.0.47",
+    "version": "3.0.48",
     "bin": {
       "cline": "bin/cline"
     },
@@ -22,20 +22,20 @@
   },
   "npm": {
     "package": "cline",
-    "version": "3.0.47",
-    "integrity": "sha512-3+RfBKRFk1s89FxYZJpM9t1dGLrpz/9WlP/zO9QP2U36C2A5ZvW7wbNKe8eFgYn52ihvKnT7wIel8KQz2vSf8Q==",
-    "shasum": "e3c46aa1a6a8a0e52c2ab81b9d3b74f62b092f35",
-    "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.47.tgz",
+    "version": "3.0.48",
+    "integrity": "sha512-rnSL88+Z8YHU+/X000jD7AI1hId7445v4HTR0jEQ/UCrFdoQ5dwAwwTIAtXgjKMqyL379Y60FSG4L4Th8aTxag==",
+    "shasum": "b02d3c261b8947c5cf6178ba0cece814a5e9395b",
+    "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.48.tgz",
     "scripts": {
       "postinstall": "node ./postinstall.mjs || true"
     },
     "optional_dependencies": {
-      "@cline/cli-darwin-arm64": "3.0.47",
-      "@cline/cli-darwin-x64": "3.0.47",
-      "@cline/cli-linux-arm64": "3.0.47",
-      "@cline/cli-linux-x64": "3.0.47",
-      "@cline/cli-windows-arm64": "3.0.47",
-      "@cline/cli-windows-x64": "3.0.47"
+      "@cline/cli-darwin-arm64": "3.0.48",
+      "@cline/cli-darwin-x64": "3.0.48",
+      "@cline/cli-linux-arm64": "3.0.48",
+      "@cline/cli-linux-x64": "3.0.48",
+      "@cline/cli-windows-arm64": "3.0.48",
+      "@cline/cli-windows-x64": "3.0.48"
     }
   },
   "package_manager": {
@@ -60,7 +60,7 @@
     "registry": "https://registry.npmjs.org/",
     "install_project_policy": "target-owned staged npm ci project only",
     "lockfile": "software/cline-cli/package-lock.json",
-    "lockfile_sha256": "0fc2629ceabe085f38b08fc90609e2056beb5dea82adbf7a01b6e3d46251db73"
+    "lockfile_sha256": "4118153e3838238453d40693d8c2e448ac45256611dbe4871e29539611d9ced6"
   },
   "extension": {
     "publisher": "saoudrizwan",

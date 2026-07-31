@@ -29,7 +29,7 @@
   "runtime_compatibility": {
     "baseline_ref": "references/cline-baseline.json",
     "version_ref": "build/version.json",
-    "cli_tested_version": "3.0.47",
+    "cli_tested_version": "3.0.48",
     "cli_package": "cline",
     "cli_command": "cline",
     "extension_tested_version": "4.0.12",
@@ -164,10 +164,10 @@
   "software_install": {
     "cli": {
       "supported": true,
-      "tested_version": "3.0.47",
+      "tested_version": "3.0.48",
       "source": "official npm package cline installed by npm ci from the committed public package-lock",
       "package": "cline",
-      "package_spec": "cline@3.0.47",
+      "package_spec": "cline@3.0.48",
       "package_manager": "npm",
       "registry": "https://registry.npmjs.org/",
       "node_preflight": {
@@ -178,7 +178,7 @@
         "software/cline-cli/package.json",
         "software/cline-cli/package-lock.json"
       ],
-      "lockfile_sha256": "0fc2629ceabe085f38b08fc90609e2056beb5dea82adbf7a01b6e3d46251db73",
+      "lockfile_sha256": "4118153e3838238453d40693d8c2e448ac45256611dbe4871e29539611d9ced6",
       "install_argv": [
         "npm",
         "ci",
@@ -196,7 +196,7 @@
         "--bin-links=false"
       ],
       "lockfile_preflight": {
-        "root_dependency": "cline@3.0.47",
+        "root_dependency": "cline@3.0.48",
         "registry_only_resolved_urls": true,
         "integrity_required_for_non_link_packages": true,
         "cline_package_wrapper_bin": "bin/cline",
@@ -213,10 +213,10 @@
       "bin_links": "disabled",
       "registry_metadata": {
         "package": "cline",
-        "version": "3.0.47",
-        "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.47.tgz",
-        "integrity": "sha512-3+RfBKRFk1s89FxYZJpM9t1dGLrpz/9WlP/zO9QP2U36C2A5ZvW7wbNKe8eFgYn52ihvKnT7wIel8KQz2vSf8Q==",
-        "shasum": "e3c46aa1a6a8a0e52c2ab81b9d3b74f62b092f35"
+        "version": "3.0.48",
+        "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.48.tgz",
+        "integrity": "sha512-rnSL88+Z8YHU+/X000jD7AI1hId7445v4HTR0jEQ/UCrFdoQ5dwAwwTIAtXgjKMqyL379Y60FSG4L4Th8aTxag==",
+        "shasum": "b02d3c261b8947c5cf6178ba0cece814a5e9395b"
       },
       "environment_policy": {
         "inheritance": "minimal-allowlist",

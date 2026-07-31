@@ -37,6 +37,8 @@ RELEASE_ARCHIVE_PATHS = [
     "VERSION",
     "CHANGELOG.md",
     "SECURITY.md",
+    ".gds/bundle.lock.yaml",
+    ".gds/compiled-policy.json",
     ".gds/repository.yaml",
     ".github",
     "build",
@@ -88,6 +90,8 @@ REQUIRED_CONTRACT_ROOTS = {
 REQUIRED_GOVERNANCE_ARCHIVE_PATHS = {
     "AGENTS.md",
     ".claude/CLAUDE.md",
+    ".gds/bundle.lock.yaml",
+    ".gds/compiled-policy.json",
     ".gds/repository.yaml",
 }
 REQUIRED_RUNTIME_INSTRUCTION_PATHS = {
@@ -95,6 +99,8 @@ REQUIRED_RUNTIME_INSTRUCTION_PATHS = {
     ".claude/CLAUDE.md",
 }
 REQUIRED_SOURCE_ONLY_GOVERNANCE_PATHS = {
+    ".gds/bundle.lock.yaml",
+    ".gds/compiled-policy.json",
     ".gds/repository.yaml",
 }
 PRIVATE_PATH_MARKERS = (
