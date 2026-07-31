@@ -326,11 +326,42 @@ def validate_no_symlinks_under(path: Path, label: str, errors: list[str]) -> Non
 def validate_versions(errors: list[str]) -> None:
     _source, manager = manager_source_contract(errors)
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    changelog_lines = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
     build = read_json("build/version.json")
     manifest = read_json("build/manifest.json")
     contract = read_json("config/nddev-contract.json")
     baseline = read_json("references/cline-baseline.json")
     require(SEMVER.fullmatch(version) is not None, "VERSION is not SemVer", errors)
+    heading = re.compile(rf"## \[{re.escape(version)}\](?: - \d{{4}}-\d{{2}}-\d{{2}})?\Z")
+    heading_indexes = [
+        index for index, line in enumerate(changelog_lines) if heading.fullmatch(line) is not None
+    ]
+    require(
+        len(heading_indexes) == 1,
+        "CHANGELOG must contain exactly one canonical current-version heading",
+        errors,
+    )
+    if len(heading_indexes) == 1:
+        heading_index = heading_indexes[0]
+        next_heading_index = next(
+            (
+                index
+                for index in range(heading_index + 1, len(changelog_lines))
+                if changelog_lines[index].startswith("## ")
+            ),
+            len(changelog_lines),
+        )
+        require(
+            any(line.strip() for line in changelog_lines[heading_index + 1 : next_heading_index]),
+            "CHANGELOG current-version section must be non-empty",
+            errors,
+        )
+        if next_heading_index < len(changelog_lines):
+            require(
+                changelog_lines[next_heading_index].startswith("## ["),
+                "CHANGELOG previous release boundary must use a bracketed heading",
+                errors,
+            )
     require(build.get("build_version") == version, "build version mismatch", errors)
     require(manifest.get("build_version") == version, "manifest version mismatch", errors)
     require(manifest.get("name") == contract.get("product_name"), "manifest name mismatch", errors)

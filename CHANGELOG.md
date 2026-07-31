@@ -1,12 +1,12 @@
 # Changelog
 
-## 0.2.1
+## [0.2.1] - 2026-08-01
 
 - Capture and strictly resolve the caller workspace once for launch, then bind
   both the child working directory and Cline's native `--cwd` argument to it.
 - Reject forwarded `--cwd`, `--cwd=...`, `-c`, and attached `-c...` overrides.
 
-## 0.2.0
+## [0.2.0]
 
 - Adopt official-channel `npm ci` installation of the frozen public Cline CLI
   lockfile into a target-owned staging project.
