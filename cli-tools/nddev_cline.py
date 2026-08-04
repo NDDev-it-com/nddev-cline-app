@@ -237,7 +237,20 @@ TRUSTED_TOOL_PATHS = (
     "/usr/local/bin",
     "/usr/bin",
     "/bin",
+    str(Path.home() / ".local" / "bin"),
 )
+# gds (macos-ubuntu-bootstrap) provisions Node under
+# ~/.local/share/rldyour/node/<version>/ and publishes only the `node`
+# symlink to ~/.local/bin; npm/npx/corepack ship as siblings of the real
+# node binary inside that verified tarball and are deliberately not
+# symlinked onto the managed PATH. Resolve the node sibling directory so
+# the npm/npx/corepack binaries remain reachable without a global publish.
+_NODE_LOOKUP_PATH = os.pathsep.join(TRUSTED_TOOL_PATHS)
+_NODE_RESOLVED = shutil.which("node", path=_NODE_LOOKUP_PATH)
+if _NODE_RESOLVED:
+    _NODE_SIBLING_BIN = str(Path(_NODE_RESOLVED).resolve().parent)
+    if _NODE_SIBLING_BIN not in TRUSTED_TOOL_PATHS:
+        TRUSTED_TOOL_PATHS = (*TRUSTED_TOOL_PATHS, _NODE_SIBLING_BIN)
 DETERMINISTIC_PATH = os.pathsep.join(TRUSTED_TOOL_PATHS)
 BLOCKED_LAUNCH_FLAGS = {
     "--auto-approve",
