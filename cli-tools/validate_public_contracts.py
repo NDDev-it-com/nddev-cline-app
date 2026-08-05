@@ -17,8 +17,8 @@ MANAGER_PATH = ROOT / "cli-tools" / "nddev_cline.py"
 SEMVER = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:[-+].*)?\Z")
 SETUP_IDS = ["nddev-builder"]
 PROFILE_IDS = ["full-auto", "safe"]
-SHARED_CI_COMMIT = "2ccb80e96f5771b6a6b4eae63a4f47e232906dc7"
-SHARED_CI_VERSION = "0.12.0"
+SHARED_CI_COMMIT = "f6ea891f09653b8d449098817c8acfdb510731f6"
+SHARED_CI_VERSION = "0.14.0-dev"
 RELEASE_WORKFLOW = ".github/workflows/release.yml"
 SHARED_CALLERS = {
     "actionlint.yml": ".github/workflows/actionlint.yml",
@@ -73,6 +73,7 @@ REQUIRED_RELEASE_PERMISSIONS = {
 }
 REQUIRED_RELEASE_INPUTS = {
     "version",
+    "runner",
     "package_name",
     "archive_paths",
     "runtime_paths",
@@ -1341,11 +1342,26 @@ def validate_release_workflow(errors: list[str]) -> None:
         "uses: NDDev-it-com/ci-workflows/.github/workflows/"
         f"release-supply-chain.yml@{SHARED_CI_COMMIT} # {SHARED_CI_VERSION}"
     )
+    expected_promotion = (
+        "uses: NDDev-it-com/ci-workflows/.github/workflows/"
+        f"release-promotion-gate.yml@{SHARED_CI_COMMIT} # {SHARED_CI_VERSION}"
+    )
     require(text.count(expected_use) == 1, "release workflow shared pin mismatch", errors)
+    require(text.count(expected_promotion) == 1, "release promotion pin mismatch", errors)
     require(
         "permissions: {}" in text, "release workflow top-level permissions must be empty", errors
     )
-    publish_permissions = _workflow_block(text, "    permissions:")
+    require("    needs: promotion" in text, "release publication must need promotion", errors)
+    require(text.count("      runner: amsterdam") == 2, "release jobs must use amsterdam", errors)
+    promotion_text = text.split("  promotion:", 1)[1].split("  publish:", 1)[0]
+    promotion_permissions = _workflow_block(promotion_text, "    permissions:")
+    require(
+        _workflow_scalar_mapping(promotion_permissions) == {"contents": "read"},
+        "release promotion permissions mismatch",
+        errors,
+    )
+    publish_text = text.split("  publish:", 1)[1]
+    publish_permissions = _workflow_block(publish_text, "    permissions:")
     require(
         _workflow_scalar_mapping(publish_permissions) == REQUIRED_RELEASE_PERMISSIONS,
         "release workflow permission set mismatch",
@@ -1357,7 +1373,7 @@ def validate_release_workflow(errors: list[str]) -> None:
             f"release workflow missing permission {name}: {value}",
             errors,
         )
-    with_block = _workflow_block(text, "    with:")
+    with_block = _workflow_block(publish_text, "    with:")
     require(
         _workflow_mapping_keys(with_block) == REQUIRED_RELEASE_INPUTS,
         "release workflow input key set mismatch",
