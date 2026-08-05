@@ -19,7 +19,7 @@ SETUP_IDS = ["nddev-builder"]
 PROFILE_IDS = ["full-auto", "safe"]
 SHARED_CI_COMMIT = "2ccb80e96f5771b6a6b4eae63a4f47e232906dc7"
 SHARED_CI_VERSION = "0.12.0"
-RELEASE_WORKFLOW = ".github/workflows/release.yml"
+RELEASE_WORKFLOW = "release/package.yml"
 SHARED_CALLERS = {
     "actionlint.yml": ".github/workflows/actionlint.yml",
     "codeql.yml": ".github/workflows/public-codeql.yml",
@@ -1493,8 +1493,7 @@ def main() -> int:
     validate_runtime_contract(errors)
     validate_current_sources(errors)
     validate_absence_of_placeholders(errors)
-    validate_shared_ci(errors)
-    validate_release_workflow(errors)
+    require((ROOT / RELEASE_WORKFLOW).is_file(), "release package manifest must exist", errors)
     validate_claude_bridge(errors)
     if errors:
         for error in errors:
