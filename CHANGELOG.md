@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.2] - 2026-08-05
+
+- Update the frozen Cline CLI graph from `3.0.48` to stable `3.0.49` and
+  refresh every exact npm integrity and target-owned lockfile identity.
+- Update the observed Visual Studio Marketplace reference from Cline `4.0.12`
+  to stable `4.1.3` with the exact VSIX digest.
+- Include Hono `4.13.0` in the regenerated graph, preserving the dependency
+  security update tracked independently by pull request #5.
+
 ## [0.2.1] - 2026-08-01
 
 - Capture and strictly resolve the caller workspace once for launch, then bind

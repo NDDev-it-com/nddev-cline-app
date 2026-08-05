@@ -10,10 +10,10 @@ provider credentials, npm credentials, user caches, or global Cline state.
 
 - CLI command: `cline`
 - CLI npm package: `cline`
-- CLI tested version: `3.0.48`
+- CLI tested version: `3.0.49`
 - Official CLI install channel: `npm install -g cline`
 - Node.js preflight: 20+ required, 22 recommended
-- VS Code extension metadata only: `saoudrizwan.claude-dev` `4.0.12`
+- VS Code extension metadata only: `saoudrizwan.claude-dev` `4.1.3`
 - Official documentation:
   <https://docs.cline.bot/getting-started/installing-cline> and
   <https://docs.cline.bot/cli/cli-reference>
