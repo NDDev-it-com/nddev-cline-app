@@ -4,7 +4,7 @@
   "cli": {
     "command": "cline",
     "package": "cline",
-    "version": "3.0.50",
+    "version": "3.0.51",
     "bin": {
       "cline": "bin/cline"
     },
@@ -22,20 +22,20 @@
   },
   "npm": {
     "package": "cline",
-    "version": "3.0.50",
-    "integrity": "sha512-/Z+lrE6KcYQxLydZGPdewTpG61XZ+eGz3UvXpwgcC4pr8J1hL+bxZkczIldZp+O+hmu3a720YPf8D7/+PYattQ==",
-    "shasum": "bea7e66e2d947f83120c347b7a6c4f3cb2126048",
-    "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.50.tgz",
+    "version": "3.0.51",
+    "integrity": "sha512-BXmEv8mn63pZZYVOViIofzyVEwcvG4JWk3oZ0pLxVwk8isS9si3XP6z0lQyesQqna8I1eaoIQydGd/DyHoKy4g==",
+    "shasum": "d6999b52378a3504bfdf5e8ecbbfd9958dc3a549",
+    "tarball": "https://registry.npmjs.org/cline/-/cline-3.0.51.tgz",
     "scripts": {
       "postinstall": "node ./postinstall.mjs || true"
     },
     "optional_dependencies": {
-      "@cline/cli-darwin-arm64": "3.0.50",
-      "@cline/cli-darwin-x64": "3.0.50",
-      "@cline/cli-linux-arm64": "3.0.50",
-      "@cline/cli-linux-x64": "3.0.50",
-      "@cline/cli-windows-arm64": "3.0.50",
-      "@cline/cli-windows-x64": "3.0.50"
+      "@cline/cli-darwin-arm64": "3.0.51",
+      "@cline/cli-darwin-x64": "3.0.51",
+      "@cline/cli-linux-arm64": "3.0.51",
+      "@cline/cli-linux-x64": "3.0.51",
+      "@cline/cli-windows-arm64": "3.0.51",
+      "@cline/cli-windows-x64": "3.0.51"
     }
   },
   "package_manager": {
@@ -60,14 +60,14 @@
     "registry": "https://registry.npmjs.org/",
     "install_project_policy": "target-owned staged npm ci project only",
     "lockfile": "software/cline-cli/package-lock.json",
-    "lockfile_sha256": "3de55343d301dab1d7bd03625bcfcf5ef32821879da39a40d9da413d0ba74560"
+    "lockfile_sha256": "12ea5e057708aab6991033c0a47802734070abecc36ac7f21edb30049c6c5250"
   },
   "extension": {
     "publisher": "saoudrizwan",
     "name": "claude-dev",
     "display_name": "Cline",
     "id": "saoudrizwan.claude-dev",
-    "version": "4.1.4",
+    "version": "4.1.6",
     "marketplace_url": "https://marketplace.visualstudio.com/items?itemName=saoudrizwan.claude-dev",
     "install_supported_by_manager": false,
     "launch_supported_by_manager": false

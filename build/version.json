@@ -1,15 +1,15 @@
 {
   "schema_version": 2,
-  "build_version": "0.2.3",
-  "cline_extension_tested": "4.1.4",
+  "build_version": "0.2.4",
+  "cline_extension_tested": "4.1.6",
   "vscode_extension_id": "saoudrizwan.claude-dev",
-  "vscode_extension_vsix_sha256": "a14f403f9fe90aacd8098bd865ed5e24df2ffb815bf20ff30443c76540ac7d3f",
-  "cline_cli_tested": "3.0.50",
+  "vscode_extension_vsix_sha256": "0cd8dab7cafc5ef6fa97f42c3dcbf65a64aacd2cef82f9c2c9571951653749bc",
+  "cline_cli_tested": "3.0.51",
   "cline_cli_package": "cline",
-  "cline_cli_integrity": "sha512-/Z+lrE6KcYQxLydZGPdewTpG61XZ+eGz3UvXpwgcC4pr8J1hL+bxZkczIldZp+O+hmu3a720YPf8D7/+PYattQ==",
-  "cline_cli_shasum": "bea7e66e2d947f83120c347b7a6c4f3cb2126048",
+  "cline_cli_integrity": "sha512-BXmEv8mn63pZZYVOViIofzyVEwcvG4JWk3oZ0pLxVwk8isS9si3XP6z0lQyesQqna8I1eaoIQydGd/DyHoKy4g==",
+  "cline_cli_shasum": "d6999b52378a3504bfdf5e8ecbbfd9958dc3a549",
   "cline_cli_install_method": "target-owned npm ci from committed package-lock with lifecycle scripts disabled",
-  "cline_cli_lockfile_sha256": "3de55343d301dab1d7bd03625bcfcf5ef32821879da39a40d9da413d0ba74560",
+  "cline_cli_lockfile_sha256": "12ea5e057708aab6991033c0a47802734070abecc36ac7f21edb30049c6c5250",
   "node_minimum_major": 20,
   "node_recommended_major": 22,
   "npm_ci_lockfile_install_env": [
@@ -26,6 +26,6 @@
     "NPM_CONFIG_IGNORE_SCRIPTS",
     "NPM_CONFIG_BIN_LINKS"
   ],
-  "nddev_builder_extension_version": "0.2.3",
+  "nddev_builder_extension_version": "0.2.4",
   "runtime_baseline_ref": "references/cline-baseline.json"
 }
