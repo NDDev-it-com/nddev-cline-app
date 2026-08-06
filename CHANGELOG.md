@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4] - 2026-08-06
+
+- Advance the stable Cline CLI from `3.0.50` to `3.0.51` and regenerate the
+  exact target-owned npm graph while retaining the reviewed Hono `4.13.0` pin.
+- Advance the Visual Studio Marketplace reference from `4.1.4` to `4.1.6`
+  with the exact official VSIX SHA-256.
+
 ## [0.2.3] - 2026-08-05
 
 - Advance the same-day stable Cline CLI from `3.0.49` to `3.0.50` and

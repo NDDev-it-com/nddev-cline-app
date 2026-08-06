@@ -5,6 +5,6 @@
   "description": "Frozen Cline CLI install graph for nddev-cline-app.",
   "license": "UNLICENSED",
   "dependencies": {
-    "cline": "3.0.50"
+    "cline": "3.0.51"
   }
 }

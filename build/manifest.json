@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "name": "nddev-cline-app",
-  "build_version": "0.2.3",
+  "build_version": "0.2.4",
   "entrypoint": "python3 cli-tools/nddev_cline.py",
   "source_root": "setups",
   "setup_ids": ["nddev-builder"],
@@ -63,10 +63,10 @@
   "runtime_compatibility": {
     "baseline_ref": "references/cline-baseline.json",
     "version_ref": "build/version.json",
-    "cli_tested_version": "3.0.50",
+    "cli_tested_version": "3.0.51",
     "cli_package": "cline",
     "cli_command": "cline",
-    "extension_tested_version": "4.1.4",
+    "extension_tested_version": "4.1.6",
     "vscode_extension_id": "saoudrizwan.claude-dev",
     "supported_platforms": ["macos-arm64", "macos-x64", "ubuntu-glibc-arm64", "ubuntu-glibc-x64"],
     "unsupported_platforms": ["windows"]
@@ -76,7 +76,7 @@
       "software/cline-cli/package.json",
       "software/cline-cli/package-lock.json"
     ],
-    "lockfile_sha256": "3de55343d301dab1d7bd03625bcfcf5ef32821879da39a40d9da413d0ba74560",
+    "lockfile_sha256": "12ea5e057708aab6991033c0a47802734070abecc36ac7f21edb30049c6c5250",
     "install_argv": [
       "npm",
       "ci",
